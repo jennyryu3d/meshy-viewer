@@ -51,6 +51,9 @@
   /* collapsible header */
   .panel-head{display:flex;align-items:center;justify-content:space-between;gap:8px;cursor:pointer}
   .panel-head h1{margin-bottom:0}
+  .ver{display:inline-block;font-family:"JetBrains Mono",monospace;font-size:10px;font-weight:700;
+    color:#160a03;background:var(--accent);border-radius:5px;padding:1px 6px;margin-left:6px;vertical-align:middle}
+  .head-actions{display:flex;gap:6px}
   .iconbtn{background:transparent;border:1px solid var(--line);border-radius:8px;
     padding:3px 9px;font-size:13px;line-height:1;color:var(--ink)}
   .panel-body{margin-top:10px}
@@ -80,8 +83,11 @@
 
   <div class="panel" id="panel">
     <div class="panel-head" id="panelHead">
-      <h1>Meshy character viewer</h1>
-      <button class="iconbtn" id="panelToggle" aria-label="toggle panel">▾</button>
+      <h1>Meshy character viewer <span class="ver">v3</span></h1>
+      <span class="head-actions">
+        <button class="iconbtn" id="reloadBtn" title="강력 새로고침" onclick="event.stopPropagation();hardReload()">⟳</button>
+        <button class="iconbtn" id="panelToggle" aria-label="toggle panel">▾</button>
+      </span>
     </div>
     <div class="panel-body" id="panelBody">
       <div class="sub">Load a rigged character, then stack animation clips onto it. URL needs your own hosting (CORS); drag-drop a .glb works locally.</div>
@@ -127,6 +133,15 @@ let actions={}, active=null, activeName=null;
 const FADE=0.3;
 const loader=new THREE.GLTFLoader();
 const $=id=>document.getElementById(id);
+const APP_VERSION="v3";
+
+// Cache-bust reload: GitHub Pages / mobile browsers cache aggressively, so a new
+// query string forces a fresh fetch of index.html (and the GLBs).
+function hardReload(){
+  const u=new URL(location.href);
+  u.searchParams.set('cb', Date.now());
+  location.replace(u.toString());
+}
 
 // ── Auto-load on page open ──────────────────────────────────────────────
 // These files live next to index.html in the repo. To update the deployed
