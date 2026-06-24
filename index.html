@@ -47,41 +47,73 @@
     color:var(--accent);font-size:15px;font-weight:600}
   .dropveil.on{display:flex}
   .legend{font-size:10px;color:var(--muted);margin-top:6px;line-height:1.5}
+
+  /* collapsible header */
+  .panel-head{display:flex;align-items:center;justify-content:space-between;gap:8px;cursor:pointer}
+  .panel-head h1{margin-bottom:0}
+  .iconbtn{background:transparent;border:1px solid var(--line);border-radius:8px;
+    padding:3px 9px;font-size:13px;line-height:1;color:var(--ink)}
+  .panel-body{margin-top:10px}
+  .panel.collapsed .panel-body{display:none}
+  .panel.collapsed{padding-bottom:12px}
+  #panelToggle{transition:transform .15s}
+  .panel.collapsed #panelToggle{transform:rotate(-90deg)}
+
+  /* always-visible clip switcher at the bottom */
+  #clipbar{position:absolute;left:0;right:0;bottom:0;z-index:5;display:none;
+    justify-content:center;padding:12px;pointer-events:none}
+  #clipbar .clips{pointer-events:auto;margin-top:0;flex-wrap:nowrap;overflow-x:auto;
+    max-width:calc(100vw - 24px);background:rgba(20,22,27,.92);backdrop-filter:blur(8px);
+    border:1px solid var(--line);border-radius:12px;padding:8px;gap:8px;
+    -webkit-overflow-scrolling:touch}
+  #clipbar .clips button{flex:0 0 auto}
+
+  @media (max-width:640px){
+    .panel{width:auto;left:8px;right:8px;top:8px;max-width:none}
+    .panel-body{max-height:58vh;overflow:auto}
+    .hintbar{display:none}
+  }
 </style>
 </head>
 <body>
   <div id="stage"></div>
 
-  <div class="panel">
-    <h1>Meshy character viewer</h1>
-    <div class="sub">Load a rigged character, then stack animation clips onto it. URL needs your own hosting (CORS); drag-drop a .glb works locally.</div>
-
-    <div class="grp">
-      <label>1 · Character (rigged GLB)</label>
-      <div class="row">
-        <input type="text" id="charUrl" placeholder="rigged_character_glb_url">
-        <button class="primary" id="charLoad">Load</button>
-      </div>
-      <label class="filebtn"><button class="ghost" style="width:100%" onclick="document.getElementById('charFile').click()">or drop / pick a .glb file</button></label>
-      <input type="file" id="charFile" accept=".glb,.gltf" style="display:none">
+  <div class="panel" id="panel">
+    <div class="panel-head" id="panelHead">
+      <h1>Meshy character viewer</h1>
+      <button class="iconbtn" id="panelToggle" aria-label="toggle panel">▾</button>
     </div>
+    <div class="panel-body" id="panelBody">
+      <div class="sub">Load a rigged character, then stack animation clips onto it. URL needs your own hosting (CORS); drag-drop a .glb works locally.</div>
 
-    <div class="grp">
-      <label>2 · Animation clips (GLB)</label>
-      <div class="row">
-        <input type="text" id="animUrl" placeholder="walking_glb_url / animation_glb_url">
-        <button id="animAdd">Add</button>
+      <div class="grp">
+        <label>1 · Character (rigged GLB)</label>
+        <div class="row">
+          <input type="text" id="charUrl" placeholder="rigged_character_glb_url">
+          <button class="primary" id="charLoad">Load</button>
+        </div>
+        <label class="filebtn"><button class="ghost" style="width:100%" onclick="document.getElementById('charFile').click()">or drop / pick a .glb file</button></label>
+        <input type="file" id="charFile" accept=".glb,.gltf" style="display:none">
       </div>
-      <label class="filebtn"><button class="ghost" style="width:100%" onclick="document.getElementById('animFile').click()">or drop / pick .glb file(s)</button></label>
-      <input type="file" id="animFile" accept=".glb,.gltf" multiple style="display:none">
-      <div class="clips" id="clips"><span class="empty">No clips yet</span></div>
-      <div class="legend">Tip: a Meshy walk/run GLB already carries the character too — only its <b>clip</b> is extracted and retargeted onto bone names, so the skeleton must match (it does, same rig).</div>
-    </div>
 
-    <div class="status" id="status">Waiting for a character…</div>
-    <button id="fitBtn" style="width:100%;margin-top:10px" title="전체 맞춤 (A)">⤢ 전체 맞춤 (A)　·　F = 원점</button>
-    <button id="resetBtn" style="width:100%;margin-top:6px;background:transparent" title="초기화 후 새 파일 로드">↺ 초기화 (새 캐릭터/클립 교체)</button>
+      <div class="grp">
+        <label>2 · Animation clips (GLB)</label>
+        <div class="row">
+          <input type="text" id="animUrl" placeholder="walking_glb_url / animation_glb_url">
+          <button id="animAdd">Add</button>
+        </div>
+        <label class="filebtn"><button class="ghost" style="width:100%" onclick="document.getElementById('animFile').click()">or drop / pick .glb file(s)</button></label>
+        <input type="file" id="animFile" accept=".glb,.gltf" multiple style="display:none">
+        <div class="legend">Tip: a Meshy walk/run GLB already carries the character too — only its <b>clip</b> is extracted and retargeted onto bone names, so the skeleton must match (it does, same rig).</div>
+      </div>
+
+      <div class="status" id="status">Waiting for a character…</div>
+      <button id="fitBtn" style="width:100%;margin-top:10px" title="전체 맞춤 (A)">⤢ 전체 맞춤 (A)　·　F = 원점</button>
+      <button id="resetBtn" style="width:100%;margin-top:6px;background:transparent" title="초기화 후 새 파일 로드">↺ 초기화 (새 캐릭터/클립 교체)</button>
+    </div>
   </div>
+
+  <div id="clipbar"><div class="clips" id="clips"></div></div>
 
   <div class="hintbar">drag to orbit · scroll to zoom · right-drag to pan · A = fit all · F = recenter origin</div>
   <div class="dropveil" id="dropveil">drop .glb to load</div>
@@ -182,6 +214,7 @@ async function setCharacter(src,label){
     // any clips embedded in the character file itself
     if(g.animations&&g.animations.length){ addClips(g.animations, label||'character'); }
     setStatus('Character loaded'+(g.animations.length?' ('+g.animations.length+' embedded clip(s))':'. Now add animation clips.'),'ok');
+    if(innerWidth<=640) $('panel').classList.add('collapsed');
   }catch(e){ setStatus('Character failed: '+errText(e),'err'); }
 }
 
@@ -230,7 +263,8 @@ function play(name){
 function renderClips(){
   const wrap=$('clips'); wrap.innerHTML='';
   const names=Object.keys(actions);
-  if(!names.length){ wrap.innerHTML='<span class="empty">No clips yet</span>'; return; }
+  $('clipbar').style.display = names.length ? 'flex' : 'none';
+  if(!names.length){ return; }
   names.forEach(n=>{
     const b=document.createElement('button'); b.textContent=n; b.dataset.n=n;
     if(n===activeName) b.classList.add('active');
@@ -305,6 +339,8 @@ function wireUI(){
   $('animFile').onchange=e=>{ [...e.target.files].forEach(f=>addAnimation(f, f.name.replace(/\.[^.]+$/,''))); };
   $('fitBtn').onclick=()=>fitAll();
   $('resetBtn').onclick=()=>resetViewer();
+  $('panelHead').onclick=()=>$('panel').classList.toggle('collapsed');
+  if(innerWidth<=640) $('panel').classList.add('collapsed');  // start collapsed on phones
   addEventListener('keydown',e=>{
     if(e.key==='a'||e.key==='A') fitAll();
     else if(e.key==='f'||e.key==='F') recenterOrigin();
