@@ -83,7 +83,7 @@
 
   <div class="panel" id="panel">
     <div class="panel-head" id="panelHead">
-      <h1>Meshy character viewer <span class="ver">v5</span></h1>
+      <h1>Meshy character viewer <span class="ver">v6</span></h1>
       <span class="head-actions">
         <button class="iconbtn" id="reloadBtn" title="강력 새로고침" onclick="event.stopPropagation();hardReload()">⟳</button>
         <button class="iconbtn" id="panelToggle" aria-label="toggle panel">▾</button>
@@ -134,11 +134,11 @@
 <script src="https://cdn.jsdelivr.net/npm/three@0.128.0/examples/js/utils/SkeletonUtils.js"></script>
 <script>
 let scene,camera,renderer,controls,clock,mixer,character;
-let actions={}, active=null, activeName=null;
+let actions={}, clipBases={}, active=null, activeName=null;
 const FADE=0.3;
 const loader=new THREE.GLTFLoader();
 const $=id=>document.getElementById(id);
-const APP_VERSION="v5";
+const APP_VERSION="v6";
 
 // Cache-bust reload: GitHub Pages / mobile browsers cache aggressively, so a new
 // query string forces a fresh fetch of index.html (and the GLBs).
@@ -203,7 +203,7 @@ function setStatus(msg,kind){const s=$('status');s.textContent=msg;s.className='
 // Clear everything so a fresh character/clips can be loaded (overwrite workflow)
 function resetViewer(){
   if(character) scene.remove(character);
-  character=null; mixer=null; actions={}; active=null; activeName=null;
+  character=null; mixer=null; actions={}; clipBases={}; active=null; activeName=null;
   renderClips();
   setStatus('Cleared. Drop or pick a .glb to load.', '');
 }
@@ -224,7 +224,7 @@ async function setCharacter(src,label){
   try{
     const g=await loadGLB(src);
     if(character) scene.remove(character);
-    actions={}; active=null; activeName=null;
+    actions={}; clipBases={}; active=null; activeName=null;
     renderClips();
     character=g.scene;
     scene.add(character);
@@ -261,18 +261,56 @@ async function addAnimation(src,label){
   }catch(e){ setStatus('Clip failed: '+errText(e),'err'); }
 }
 
-function registerClip(clip, label, i){
-  if($('driftChk') && $('driftChk').checked) stripRootDrift(clip);
-  let name=(clip.name&&clip.name.trim())||label;
-  if(actions[name]) name=label+'·'+(i+1);
-  if(actions[name]) name=name+'·'+Math.random().toString(36).slice(2,5);
-  clip.name=name;
-  actions[name]=mixer.clipAction(clip);
+function registerClip(baseClip, label, i){
+  // We keep the *base* clip (full root motion) untouched and derive the played
+  // clip from it on demand, so the "제자리 고정" toggle is reversible at runtime.
+  let name=(baseClip.name&&baseClip.name.trim())||label;
+  if(clipBases[name]) name=label+'·'+(i+1);
+  if(clipBases[name]) name=name+'·'+Math.random().toString(36).slice(2,5);
+  baseClip.name=name;
+  clipBases[name]=baseClip;
+  actions[name]=mixer.clipAction(buildPlayClip(name));
   if(!active){ play(name); }
 }
 
 function addClips(clips,label){            // used for embedded clips in the character file
   clips.forEach((clip,i)=>registerClip(clip,label,i));
+  renderClips();
+}
+
+function driftOn(){ return $('driftChk') && $('driftChk').checked; }
+
+// The clip the mixer actually plays: the stored base as-is, or a drift-stripped
+// clone when "제자리 고정" is on. The base is never mutated → toggling is lossless.
+function buildPlayClip(name){
+  const base=clipBases[name];
+  if(driftOn()){ const c=cloneClip(base); stripRootDrift(c); return c; }
+  return base;
+}
+
+function cloneClip(clip){
+  const tracks=clip.tracks.map(t=>t.clone());
+  return new THREE.AnimationClip(clip.name, clip.duration, tracks);
+}
+
+// Re-derive every action from its base for the current drift state, preserving
+// which clip is playing and where in the loop it is. Called when the toggle flips.
+// We spin up a fresh mixer rather than uncaching the old actions — uncaching the
+// in-flight active clip corrupts the mixer's internal bookkeeping.
+function rebuildActions(){
+  if(!mixer) return;
+  const keepName=activeName, keepTime=active?active.time:0;
+  mixer.stopAllAction();
+  mixer=new THREE.AnimationMixer(character);
+  actions={};
+  Object.keys(clipBases).forEach(name=>{ actions[name]=mixer.clipAction(buildPlayClip(name)); });
+  active=null; activeName=null;
+  if(keepName && actions[keepName]){
+    const a=actions[keepName];
+    a.reset().setLoop(THREE.LoopRepeat,Infinity).setEffectiveWeight(1).play();
+    a.time=keepTime;
+    active=a; activeName=keepName;
+  }
   renderClips();
 }
 
@@ -319,24 +357,117 @@ function buildNameMap(targetSkel, srcSkel){
   return {names, matched, total:targetSkel.bones.length};
 }
 
+// Rest-pose-corrected retargeting.
+//
+// SkeletonUtils.retargetClip only renames bones; it does NOT account for the two
+// skeletons having different bind (rest) poses and different per-bone local axes,
+// so the rotation data lands in the wrong frame → T-pose / broken limbs.
+//
+// Instead we transform each source local rotation into the target's local frame
+// through the bones' REST WORLD orientations:
+//
+//   qsΔ = qsRest⁻¹ · qs            (source motion as a delta from its own rest,
+//                                   expressed in the source bone's rest frame)
+//   C   = Wt⁻¹ · Ws               (constant per bone: maps source rest frame → target)
+//   qt  = qtRest · C · qsΔ · C⁻¹  (the same world-space motion, re-expressed in the
+//                                   target bone's local frame, on top of its rest)
+//
+// Ws / Wt are the bones' world rotations at rest; qsRest / qtRest their local rest
+// rotations. At rest (qs = qsRest) this collapses to qt = qtRest, i.e. no change.
 function retargetToCharacter(targetSM, srcSM, srcScene, clip){
-  if(!THREE.SkeletonUtils || !THREE.SkeletonUtils.retargetClip){ return {error:'retarget lib not loaded'}; }
-  const {names, matched, total}=buildNameMap(targetSM.skeleton, srcSM.skeleton);
+  const targetSkel=targetSM.skeleton, srcSkel=srcSM.skeleton;
+  const {names, matched, total}=buildNameMap(targetSkel, srcSkel);
   if(matched < 6) return {error:`only ${matched} bones matched — skeleton too different`};
-  // Pose both at rest and update matrices WITHOUT adding the source mesh to the
-  // visible scene (that left a giant ghost mesh on screen). Detached matrices are
-  // valid for the retargeter as long as we update them manually.
+
+  // Pose BOTH skeletons at their bind pose to read rest local + rest world rots.
+  // The source mesh is detached from any scene transform (never added to the scene)
+  // so its world rotations are pure skeleton orientation.
   srcScene.position.set(0,0,0); srcScene.rotation.set(0,0,0); srcScene.scale.set(1,1,1);
-  targetSM.skeleton.pose(); srcSM.skeleton.pose();
-  srcScene.updateMatrixWorld(true); character.updateMatrixWorld(true);
-  let out=null, err=null;
+  const savedQ=targetSkel.bones.map(b=>b.quaternion.clone());
+  const savedP=targetSkel.bones.map(b=>b.position.clone());
   try{
-    out=THREE.SkeletonUtils.retargetClip(targetSM, srcSM, clip, { fps:30, names });
-  }catch(e){ err=e.message; console.error(e); }
-  // The retargeter leaves the character posed at the last sampled frame — reset it
-  // so the mixer's active clip drives it cleanly.
-  targetSM.skeleton.pose();
-  return out ? {clip:out, matched, total} : {error:'retarget error: '+(err||'unknown')};
+    targetSkel.pose(); srcSkel.pose();
+    srcScene.updateMatrixWorld(true); character.updateMatrixWorld(true);
+
+    const srcBoneByName={}; srcSkel.bones.forEach(b=>srcBoneByName[b.name]=b);
+    const targetBoneByName={}; targetSkel.bones.forEach(b=>targetBoneByName[b.name]=b);
+
+    // Index source clip tracks by bone name + property (quaternion / position).
+    const srcTracks={};
+    clip.tracks.forEach(t=>{
+      const dot=t.name.lastIndexOf('.'); if(dot<0) return;
+      const bn=t.name.slice(0,dot), prop=t.name.slice(dot+1);
+      (srcTracks[bn]||(srcTracks[bn]={}))[prop]=t;
+    });
+
+    const Ws=new THREE.Quaternion(), Wt=new THREE.Quaternion();
+    const newTracks=[];
+    let hipsInfo=null;
+
+    Object.keys(names).forEach(tName=>{
+      const sName=names[tName];
+      const tBone=targetBoneByName[tName], sBone=srcBoneByName[sName];
+      if(!tBone||!sBone) return;
+      const st=srcTracks[sName]; if(!st) return;
+
+      const qtRest=tBone.quaternion.clone();
+      const qsRestInv=sBone.quaternion.clone().invert();
+      tBone.getWorldQuaternion(Wt); sBone.getWorldQuaternion(Ws);
+      const C=Wt.clone().invert().multiply(Ws);      // Wt⁻¹ · Ws
+      const Cinv=C.clone().invert();
+
+      if(st.quaternion){
+        const src=st.quaternion, n=src.times.length, vals=new Float32Array(n*4);
+        const qs=new THREE.Quaternion(), qd=new THREE.Quaternion(), qt=new THREE.Quaternion();
+        for(let k=0;k<n;k++){
+          const o=k*4;
+          qs.set(src.values[o],src.values[o+1],src.values[o+2],src.values[o+3]);
+          qd.copy(qsRestInv).multiply(qs);                          // qsRest⁻¹ · qs
+          qt.copy(qtRest).multiply(C).multiply(qd).multiply(Cinv);  // qtRest · C · qsΔ · C⁻¹
+          vals[o]=qt.x; vals[o+1]=qt.y; vals[o+2]=qt.z; vals[o+3]=qt.w;
+        }
+        newTracks.push(new THREE.QuaternionKeyframeTrack(tName+'.quaternion', Array.from(src.times), vals));
+      }
+
+      if(!hipsInfo && canonBone(tName)==='hips' && st.position){
+        hipsInfo={tName,tBone,sBone,posTrack:st.position,
+          ptRest:tBone.position.clone(), psRest:sBone.position.clone()};
+      }
+    });
+
+    // Hips translation: scale the source's motion by the rest hip-height ratio and
+    // re-express it in the target's parent frame, layered on the target's rest offset.
+    if(hipsInfo){
+      const {tName,tBone,sBone,posTrack,ptRest,psRest}=hipsInfo;
+      // Scale by the LOCAL rest hip-height ratio — the position track lives in the
+      // bone's local (parent) space, so we must compare like-for-like. (World heights
+      // would fold in each rig's armature scale: e.g. Meshy's Armature is ×0.01, which
+      // is applied to the whole character anyway, so motion must stay in local units.)
+      const tY=Math.abs(ptRest.y), sY=Math.abs(psRest.y);
+      const scale=(sY>1e-4 && tY>1e-4) ? tY/sY : 1;
+      const spw=new THREE.Quaternion(), tpwInv=new THREE.Quaternion();
+      (sBone.parent||sBone).getWorldQuaternion(spw);
+      (tBone.parent||tBone).getWorldQuaternion(tpwInv); tpwInv.invert();
+      const n=posTrack.times.length, vals=new Float32Array(n*3), d=new THREE.Vector3();
+      for(let k=0;k<n;k++){
+        const o=k*3;
+        d.set(posTrack.values[o]-psRest.x, posTrack.values[o+1]-psRest.y, posTrack.values[o+2]-psRest.z);
+        d.applyQuaternion(spw).multiplyScalar(scale).applyQuaternion(tpwInv); // src-local→world→scale→target-local
+        vals[o]=ptRest.x+d.x; vals[o+1]=ptRest.y+d.y; vals[o+2]=ptRest.z+d.z;
+      }
+      newTracks.push(new THREE.VectorKeyframeTrack(tName+'.position', Array.from(posTrack.times), vals));
+    }
+
+    if(!newTracks.length) return {error:'no retargetable tracks'};
+    const out=new THREE.AnimationClip(clip.name||'retargeted', clip.duration, newTracks);
+    return {clip:out, matched, total};
+  }catch(e){
+    console.error(e); return {error:'retarget error: '+(e.message||'unknown')};
+  }finally{
+    // Restore the target to the pose it had before we sampled rest (mixer re-drives it).
+    savedQ.forEach((q,i)=>targetSkel.bones[i].quaternion.copy(q));
+    savedP.forEach((p,i)=>targetSkel.bones[i].position.copy(p));
+  }
 }
 
 // Pin x/z of any position track to its first frame so the character animates
@@ -437,6 +568,7 @@ function wireUI(){
   $('animFile').onchange=e=>{ [...e.target.files].forEach(f=>addAnimation(f, f.name.replace(/\.[^.]+$/,''))); };
   $('fitBtn').onclick=()=>fitAll();
   $('resetBtn').onclick=()=>resetViewer();
+  $('driftChk').onchange=()=>rebuildActions();   // live toggle: rebuild from base clips
   $('panelHead').onclick=()=>$('panel').classList.toggle('collapsed');
   if(innerWidth<=640) $('panel').classList.add('collapsed');  // start collapsed on phones
   addEventListener('keydown',e=>{

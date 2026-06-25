@@ -8,21 +8,27 @@
 - **Meshy 자체 클립**(같은 골격)은 완벽히 재생됨. 멀티 클립 버튼 전환 OK.
 - 외부 클립(DeepMotion) 추가 시 **본 이름 자동 매칭은 성공** → `retargeted 21/24 bones`.
 
-## 막힌 것 (핵심 버그)
-1. **리타게팅된 클립이 깨진다.** `Timeline_2`(DeepMotion) 버튼 → 캐릭터가 T-pose로 정지하거나 누운 포즈 등 엉뚱하게 감. 본은 매칭됐지만 회전이 잘못 들어감.
-   - 원인: `THREE.SkeletonUtils.retargetClip`이 **두 골격의 rest(bind) 포즈·본 로컬 축 차이를 보정하지 못함.** 이름만 맞추면 회전 데이터가 어긋남.
-2. **"제자리 고정"(drift strip) 토글이 재생 중 반영 안 됨.** 현재 클립 *추가 시점*에만 `stripRootDrift()`가 적용됨. 실시간 토글로 바꿔야 함.
+## 해결됨 (v6) ✅
+1. **rest-pose 보정 리타게팅 구현 완료.** `SkeletonUtils.retargetClip`(이름만 변경)을
+   버리고 `retargetToCharacter()`를 직접 구현. 본별로 두 골격의 **rest world 회전**으로
+   소스 로컬 회전을 타깃 로컬 공간으로 변환:
+   - `qsΔ = qsRest⁻¹ · qs` (소스 rest로부터의 모션 델타, 소스 본 프레임)
+   - `C = Wt⁻¹ · Ws` (본별 상수: 소스 rest 프레임 → 타깃 프레임. Ws/Wt = rest world 회전)
+   - `qt = qtRest · C · qsΔ · C⁻¹` (같은 월드 모션을 타깃 로컬 프레임에 재표현)
+   - rest(qs=qsRest)에서 qt=qtRest로 collapse → 변화 없음(올바름).
+   - **검증:** DeepMotion `Timeline_2`가 character.glb에서 자연스러운 보행으로 재생됨.
+     소스 대비 월드 회전 모션 차이 평균 ~2–6° (T-pose면 100°+). Playwright 스크린샷 확인.
+2. **drift strip 실시간 토글 완료.** 원본(=base) 클립을 `clipBases`에 보관, 재생용 클립은
+   `buildPlayClip()`이 체크박스 상태에 따라 base 그대로 / strip한 clone을 반환.
+   체크박스 `onchange` → `rebuildActions()`가 새 mixer로 액션 재생성(현재 클립·재생 위치 유지).
+3. **hips 위치 스케일 보정 완료.** position 트랙은 **로컬** 공간이므로 **로컬** rest hip
+   높이 비율(`ptRest.y/psRest.y`)로 스케일 (월드 높이는 armature 스케일이 섞여 틀림 — Meshy
+   Armature는 ×0.01). 부모 world 회전으로 이동 방향 재표현. drift off 시 좌우 이동 살아남.
 
-## 다음 작업 (TODO)
-1. **rest-pose 보정 리타게팅 재구현.** retargetClip 대신, 본별로
-   `targetBindLocal⁻¹ · (sourceParentWorld⁻¹ · sourceBoneWorld) · ...` 형태의
-   bind-pose delta를 계산해 소스 회전을 타깃 로컬 공간으로 변환. 즉
-   `q_target_local = Bt⁻¹ · Bs · q_source_local · Bs⁻¹ · Bt` 류의 retarget.
-   (참고: three의 retargetClip 소스, 또는 mixamo→VRM 리타게팅 구현들.)
-   - 검증: walk/idle 같은 명확한 모션이 팔 꼬임 없이 자연스럽게 나와야 함.
-2. **drift strip을 실시간 토글로.** 원본 트랙을 보관하고, 체크박스 변경 시
-   활성 액션을 재생성(원본 ↔ strip 버전 스왑).
-3. (선택) hips 위치 스케일 보정 — 소스/타깃 키 비율로 hip translation 스케일.
+### 주의 (다음 사람용)
+- Meshy `character.glb`의 Armature 스케일이 **0.01** → 본은 로컬 ~0.94, 월드 hip 높이 ~0.0094m.
+  카메라 fitAll이 알아서 프레이밍하므로 보기엔 정상. 위치 계산 시 로컬/월드 단위 혼동 주의.
+- 발/발가락(LeftFoot/ToeBase)은 rest 축 차이 + 빠른 모션으로 순간 회전 편차가 큼(시각적으론 OK).
 
 ## 검증된 사실 — 본 이름 맵 (이게 핵심 자산)
 DeepMotion(소스, `*_JNT`) → Meshy(타깃):
