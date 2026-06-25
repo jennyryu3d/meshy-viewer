@@ -83,7 +83,7 @@
 
   <div class="panel" id="panel">
     <div class="panel-head" id="panelHead">
-      <h1>Meshy character viewer <span class="ver">v4</span></h1>
+      <h1>Meshy character viewer <span class="ver">v5</span></h1>
       <span class="head-actions">
         <button class="iconbtn" id="reloadBtn" title="강력 새로고침" onclick="event.stopPropagation();hardReload()">⟳</button>
         <button class="iconbtn" id="panelToggle" aria-label="toggle panel">▾</button>
@@ -138,7 +138,7 @@ let actions={}, active=null, activeName=null;
 const FADE=0.3;
 const loader=new THREE.GLTFLoader();
 const $=id=>document.getElementById(id);
-const APP_VERSION="v4";
+const APP_VERSION="v5";
 
 // Cache-bust reload: GitHub Pages / mobile browsers cache aggressively, so a new
 // query string forces a fresh fetch of index.html (and the GLBs).
@@ -323,14 +323,19 @@ function retargetToCharacter(targetSM, srcSM, srcScene, clip){
   if(!THREE.SkeletonUtils || !THREE.SkeletonUtils.retargetClip){ return {error:'retarget lib not loaded'}; }
   const {names, matched, total}=buildNameMap(targetSM.skeleton, srcSM.skeleton);
   if(matched < 6) return {error:`only ${matched} bones matched — skeleton too different`};
-  scene.add(srcScene); srcScene.visible=false;
+  // Pose both at rest and update matrices WITHOUT adding the source mesh to the
+  // visible scene (that left a giant ghost mesh on screen). Detached matrices are
+  // valid for the retargeter as long as we update them manually.
+  srcScene.position.set(0,0,0); srcScene.rotation.set(0,0,0); srcScene.scale.set(1,1,1);
   targetSM.skeleton.pose(); srcSM.skeleton.pose();
-  character.updateMatrixWorld(true); srcScene.updateMatrixWorld(true);
+  srcScene.updateMatrixWorld(true); character.updateMatrixWorld(true);
   let out=null, err=null;
   try{
     out=THREE.SkeletonUtils.retargetClip(targetSM, srcSM, clip, { fps:30, names });
   }catch(e){ err=e.message; console.error(e); }
-  scene.remove(srcScene);
+  // The retargeter leaves the character posed at the last sampled frame — reset it
+  // so the mixer's active clip drives it cleanly.
+  targetSM.skeleton.pose();
   return out ? {clip:out, matched, total} : {error:'retarget error: '+(err||'unknown')};
 }
 
