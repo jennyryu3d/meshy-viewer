@@ -83,7 +83,7 @@
 
   <div class="panel" id="panel">
     <div class="panel-head" id="panelHead">
-      <h1>Meshy character viewer <span class="ver">v6</span></h1>
+      <h1>Meshy character viewer <span class="ver">v7</span></h1>
       <span class="head-actions">
         <button class="iconbtn" id="reloadBtn" title="강력 새로고침" onclick="event.stopPropagation();hardReload()">⟳</button>
         <button class="iconbtn" id="panelToggle" aria-label="toggle panel">▾</button>
@@ -138,7 +138,7 @@ let actions={}, clipBases={}, active=null, activeName=null;
 const FADE=0.3;
 const loader=new THREE.GLTFLoader();
 const $=id=>document.getElementById(id);
-const APP_VERSION="v6";
+const APP_VERSION="v7";
 
 // Cache-bust reload: GitHub Pages / mobile browsers cache aggressively, so a new
 // query string forces a fresh fetch of index.html (and the GLBs).
@@ -318,6 +318,17 @@ function findSkinned(root){
   let sm=null; root && root.traverse(o=>{ if(!sm && o.isSkinnedMesh) sm=o; }); return sm;
 }
 
+// Leg length (thigh+shin+foot) from LOCAL bone offsets — the rig's standing hip height
+// in local units, used to scale root translation between skeletons of different size.
+// We sum |bone.position| rather than world distances on purpose: some rigs (Meshy) have
+// a degenerate inverse-bind pose whose WORLD positions collapse after skeleton.pose(),
+// but the local offsets stay correct.
+function legLen(skel){
+  const find=k=>skel.bones.find(b=>canonBone(b.name)===k);
+  return ['lleg','lfoot','ltoe'].map(find).filter(Boolean)
+    .reduce((L,b)=>L+b.position.length(),0);
+}
+
 // Does this clip's skeleton match the character's? If most of its bones aren't in
 // the target skeleton, it's an external rig → needs retargeting.
 function needsRetarget(clip, targetSM){
@@ -385,6 +396,8 @@ function retargetToCharacter(targetSM, srcSM, srcScene, clip){
   srcScene.position.set(0,0,0); srcScene.rotation.set(0,0,0); srcScene.scale.set(1,1,1);
   const savedQ=targetSkel.bones.map(b=>b.quaternion.clone());
   const savedP=targetSkel.bones.map(b=>b.position.clone());
+  const savedS=targetSkel.bones.map(b=>b.scale.clone());
+  const restore=()=>{ targetSkel.bones.forEach((b,i)=>{ b.quaternion.copy(savedQ[i]); b.position.copy(savedP[i]); b.scale.copy(savedS[i]); }); };
   try{
     targetSkel.pose(); srcSkel.pose();
     srcScene.updateMatrixWorld(true); character.updateMatrixWorld(true);
@@ -435,39 +448,73 @@ function retargetToCharacter(targetSM, srcSM, srcScene, clip){
       }
     });
 
-    // Hips translation: scale the source's motion by the rest hip-height ratio and
-    // re-express it in the target's parent frame, layered on the target's rest offset.
+    // Hips translation. The position track is the rig's ROOT motion (height + travel),
+    // so it must be scaled to the target's body size and mapped through the parent
+    // world transforms. We scale by the bind-pose LEG-LENGTH ratio (hip→toe), which is
+    // the true standing hip height — the target's bind-pose hips Y is unreliable here
+    // (Meshy's bind is a folded pose, and its Armature is ×0.01). Working in WORLD space
+    // (then back to target-local) absorbs the armature scale automatically; without this
+    // the legs extend past a too-low hip and the character sinks through the floor.
     if(hipsInfo){
-      const {tName,tBone,sBone,posTrack,ptRest,psRest}=hipsInfo;
-      // Scale by the LOCAL rest hip-height ratio — the position track lives in the
-      // bone's local (parent) space, so we must compare like-for-like. (World heights
-      // would fold in each rig's armature scale: e.g. Meshy's Armature is ×0.01, which
-      // is applied to the whole character anyway, so motion must stay in local units.)
-      const tY=Math.abs(ptRest.y), sY=Math.abs(psRest.y);
-      const scale=(sY>1e-4 && tY>1e-4) ? tY/sY : 1;
-      const spw=new THREE.Quaternion(), tpwInv=new THREE.Quaternion();
-      (sBone.parent||sBone).getWorldQuaternion(spw);
-      (tBone.parent||tBone).getWorldQuaternion(tpwInv); tpwInv.invert();
-      const n=posTrack.times.length, vals=new Float32Array(n*3), d=new THREE.Vector3();
+      const {tName,sBone,posTrack}=hipsInfo;
+      // K maps source hips position → target hips LOCAL units. We want the target hips to
+      // sit at its own leg length (correct standing height) when the source hips are at
+      // their standing height. Numerator = target leg length (local offsets, robust to the
+      // degenerate bind); denominator = source STANDING hip height (its bind world Y — the
+      // source bind IS a proper standing pose, so this is reliable). The target Armature
+      // scale is applied by the renderer on top of this local value, so we don't divide it out.
+      const sHipY=sBone.getWorldPosition(new THREE.Vector3()).y;
+      const K=(sHipY>1e-6) ? legLen(targetSkel)/sHipY : 1;
+      const sParentW=(sBone.parent||sBone).matrixWorld.clone();
+      const n=posTrack.times.length, vals=new Float32Array(n*3), p=new THREE.Vector3();
       for(let k=0;k<n;k++){
         const o=k*3;
-        d.set(posTrack.values[o]-psRest.x, posTrack.values[o+1]-psRest.y, posTrack.values[o+2]-psRest.z);
-        d.applyQuaternion(spw).multiplyScalar(scale).applyQuaternion(tpwInv); // src-local→world→scale→target-local
-        vals[o]=ptRest.x+d.x; vals[o+1]=ptRest.y+d.y; vals[o+2]=ptRest.z+d.z;
+        p.set(posTrack.values[o],posTrack.values[o+1],posTrack.values[o+2]);
+        p.applyMatrix4(sParentW);   // source hips local → source world
+        p.multiplyScalar(K);        // → target hips LOCAL units (scaled to target body size)
+        vals[o]=p.x; vals[o+1]=p.y; vals[o+2]=p.z;
       }
       newTracks.push(new THREE.VectorKeyframeTrack(tName+'.position', Array.from(posTrack.times), vals));
     }
 
     if(!newTracks.length) return {error:'no retargetable tracks'};
     const out=new THREE.AnimationClip(clip.name||'retargeted', clip.duration, newTracks);
+    // Restore the authored pose/scale BEFORE grounding — pose() left the skeleton in the
+    // degenerate bind (collapsed scales), so foot positions would be meaningless otherwise.
+    restore(); character.updateMatrixWorld(true);
+    groundClip(out);   // lift hips so the lowest foot rests on the floor each frame
     return {clip:out, matched, total};
   }catch(e){
     console.error(e); return {error:'retarget error: '+(e.message||'unknown')};
   }finally{
-    // Restore the target to the pose it had before we sampled rest (mixer re-drives it).
-    savedQ.forEach((q,i)=>targetSkel.bones[i].quaternion.copy(q));
-    savedP.forEach((p,i)=>targetSkel.bones[i].position.copy(p));
+    restore();   // ensure the target is back to its pre-sample state (mixer re-drives it)
   }
+}
+
+// Foot-ground a retargeted clip: sample it on the character and raise the hips so the
+// lowest foot sits on y=0 at every keyframe. This corrects residual vertical offset from
+// rig-proportion / bind-pose differences, and because the lift is pose-driven it keeps the
+// natural vertical bob (hips ride high when the support leg is straight, low when bent).
+// Only x/z stays from the root track; the hips Y is fully derived from foot contact.
+function groundClip(clip){
+  const skel=findSkinned(character) && findSkinned(character).skeleton; if(!skel) return;
+  const hipsName=clip.tracks.map(t=>t.name.split('.')[0]).find(n=>canonBone(n)==='hips');
+  const hipsTrack=clip.tracks.find(t=>t.name===hipsName+'.position'); if(!hipsTrack) return;
+  const feet=skel.bones.filter(b=>['lfoot','rfoot','ltoe','rtoe'].includes(canonBone(b.name)));
+  if(!feet.length) return;
+  const hipsBone=skel.bones.find(b=>b.name===hipsName), parent=hipsBone.parent||hipsBone;
+  parent.updateWorldMatrix(true,false);
+  const sc=new THREE.Vector3(); parent.matrixWorld.decompose(new THREE.Vector3(),new THREE.Quaternion(),sc);
+  const scaleY=sc.y||1;                          // armature scale → world per local unit
+  const tmp=new THREE.AnimationMixer(character); tmp.clipAction(clip).play();
+  const v=new THREE.Vector3(), lifts=[];
+  for(let k=0;k<hipsTrack.times.length;k++){     // measure first (don't mutate mid-sample)
+    tmp.setTime(hipsTrack.times[k]); character.updateMatrixWorld(true);
+    let minY=Infinity; feet.forEach(b=>{ b.getWorldPosition(v); if(v.y<minY) minY=v.y; });
+    lifts.push(minY===Infinity ? 0 : -minY/scaleY);
+  }
+  for(let k=0;k<lifts.length;k++) hipsTrack.values[k*3+1]+=lifts[k];
+  tmp.stopAllAction(); tmp.uncacheClip(clip);
 }
 
 // Pin x/z of any position track to its first frame so the character animates

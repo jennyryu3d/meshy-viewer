@@ -25,10 +25,25 @@
    높이 비율(`ptRest.y/psRest.y`)로 스케일 (월드 높이는 armature 스케일이 섞여 틀림 — Meshy
    Armature는 ×0.01). 부모 world 회전으로 이동 방향 재표현. drift off 시 좌우 이동 살아남.
 
+## v7 — 수직 위치(가라앉음) 수정
+v6에서 Timeline_2 재생 시 캐릭터가 그리드 아래로 가라앉는 문제 수정. 원인 2가지:
+1. **degenerate bind pose.** Meshy 리그의 `inverseBindMatrices`(=`skeleton.pose()` 결과)는
+   다리가 거의 0으로 접힌 비정상 bind라, pose() 후 월드 거리/스케일이 붕괴됨(다리 0.0087 world).
+   실제 재생은 authored 스케일(다리 ~0.81 world). → leg length는 **로컬 오프셋 합**(`bone.position`)
+   으로 측정해야 안전. hips 높이 baseline도 bind hips(0.94)가 아니라 **소스의 standing hip
+   월드 높이**(소스 bind는 정상 standing)로 스케일.
+3. **foot grounding 추가(`groundClip`).** 리타게팅 클립을 캐릭터에 임시 mixer로 샘플링해,
+   매 키프레임 hips Y를 올려 **최저 발이 y=0**에 닿게 함. pose-driven이라 자연스러운 수직
+   bob도 보존됨. x/z(좌우 이동)는 소스에서 스케일해 유지. **반드시 authored pose/scale로
+   복원한 뒤** grounding 실행(안 그러면 degenerate 스케일로 샘플링돼 무의미).
+   - 검증: hips 월드 Y 0.80~0.96, 최저 발 0~0.07(그리드 위), drift on=제자리+bob, off=이동.
+
 ### 주의 (다음 사람용)
-- Meshy `character.glb`의 Armature 스케일이 **0.01** → 본은 로컬 ~0.94, 월드 hip 높이 ~0.0094m.
-  카메라 fitAll이 알아서 프레이밍하므로 보기엔 정상. 위치 계산 시 로컬/월드 단위 혼동 주의.
+- Meshy `character.glb`의 Armature 스케일이 **0.01**. bind pose(`skeleton.pose()`)는 실제
+  standing 포즈와 다른 degenerate 상태 — 월드 거리 측정 신뢰 불가, 로컬 오프셋 사용할 것.
 - 발/발가락(LeftFoot/ToeBase)은 rest 축 차이 + 빠른 모션으로 순간 회전 편차가 큼(시각적으론 OK).
+- `groundClip`은 매 프레임 최저 발을 바닥에 붙이므로 **점프(양발이 뜨는 모션)** 는 눌릴 수 있음.
+  현재 자산(보행)엔 문제없음. 점프 클립 필요 시 grounding을 상수 오프셋 방식으로 바꿀 것.
 
 ## 검증된 사실 — 본 이름 맵 (이게 핵심 자산)
 DeepMotion(소스, `*_JNT`) → Meshy(타깃):
