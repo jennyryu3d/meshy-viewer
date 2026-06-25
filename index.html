@@ -83,7 +83,7 @@
 
   <div class="panel" id="panel">
     <div class="panel-head" id="panelHead">
-      <h1>Meshy character viewer <span class="ver">v3</span></h1>
+      <h1>Meshy character viewer <span class="ver">v4</span></h1>
       <span class="head-actions">
         <button class="iconbtn" id="reloadBtn" title="강력 새로고침" onclick="event.stopPropagation();hardReload()">⟳</button>
         <button class="iconbtn" id="panelToggle" aria-label="toggle panel">▾</button>
@@ -111,6 +111,10 @@
         <label class="filebtn"><button class="ghost" style="width:100%" onclick="document.getElementById('animFile').click()">or drop / pick .glb file(s)</button></label>
         <input type="file" id="animFile" accept=".glb,.gltf" multiple style="display:none">
         <div class="legend">Tip: a Meshy walk/run GLB already carries the character too — only its <b>clip</b> is extracted and retargeted onto bone names, so the skeleton must match (it does, same rig).</div>
+        <label style="display:flex;align-items:center;gap:8px;margin-top:8px;font-size:12px;color:var(--ink);cursor:pointer">
+          <input type="checkbox" id="driftChk" checked style="width:16px;height:16px;accent-color:var(--accent)">
+          제자리 고정 (좌우 이동 제거) — 끄면 외부 모션의 이동이 살아남
+        </label>
       </div>
 
       <div class="status" id="status">Waiting for a character…</div>
@@ -127,13 +131,14 @@
 <script src="https://cdn.jsdelivr.net/npm/three@0.128.0/build/three.min.js"></script>
 <script src="https://cdn.jsdelivr.net/npm/three@0.128.0/examples/js/controls/OrbitControls.js"></script>
 <script src="https://cdn.jsdelivr.net/npm/three@0.128.0/examples/js/loaders/GLTFLoader.js"></script>
+<script src="https://cdn.jsdelivr.net/npm/three@0.128.0/examples/js/utils/SkeletonUtils.js"></script>
 <script>
 let scene,camera,renderer,controls,clock,mixer,character;
 let actions={}, active=null, activeName=null;
 const FADE=0.3;
 const loader=new THREE.GLTFLoader();
 const $=id=>document.getElementById(id);
-const APP_VERSION="v3";
+const APP_VERSION="v4";
 
 // Cache-bust reload: GitHub Pages / mobile browsers cache aggressively, so a new
 // query string forces a fresh fetch of index.html (and the GLBs).
@@ -239,21 +244,94 @@ async function addAnimation(src,label){
   try{
     const g=await loadGLB(src);
     if(!g.animations||!g.animations.length){ setStatus('No animation track in that file.','err'); return; }
-    addClips(g.animations,label||'clip');   // only the clips; ignore its mesh
-    setStatus('Added '+g.animations.length+' clip(s).','ok');
+    const targetSM=findSkinned(character);
+    const srcSM=findSkinned(g.scene);
+    let note='';
+    g.animations.forEach((clip,i)=>{
+      let finalClip=clip;
+      if(targetSM && srcSM && needsRetarget(clip,targetSM)){
+        const r=retargetToCharacter(targetSM, srcSM, g.scene, clip);
+        if(r.clip){ finalClip=r.clip; note=` (retargeted ${r.matched}/${r.total} bones)`; }
+        else { note=' — '+r.error; }
+      }
+      registerClip(finalClip, label||'clip', i);
+    });
+    renderClips();
+    setStatus('Added '+g.animations.length+' clip(s)'+note,'ok');
   }catch(e){ setStatus('Clip failed: '+errText(e),'err'); }
 }
 
-function addClips(clips,label){
-  clips.forEach((clip,i)=>{
-    stripRootDrift(clip);
-    let name=(clip.name&&clip.name.trim())||label;
-    if(actions[name]) name=label+'·'+(i+1)+'·'+Math.random().toString(36).slice(2,5);
-    clip.name=name;
-    actions[name]=mixer.clipAction(clip);   // bound to character root by bone name
-    if(!active){ play(name); }
-  });
+function registerClip(clip, label, i){
+  if($('driftChk') && $('driftChk').checked) stripRootDrift(clip);
+  let name=(clip.name&&clip.name.trim())||label;
+  if(actions[name]) name=label+'·'+(i+1);
+  if(actions[name]) name=name+'·'+Math.random().toString(36).slice(2,5);
+  clip.name=name;
+  actions[name]=mixer.clipAction(clip);
+  if(!active){ play(name); }
+}
+
+function addClips(clips,label){            // used for embedded clips in the character file
+  clips.forEach((clip,i)=>registerClip(clip,label,i));
   renderClips();
+}
+
+function findSkinned(root){
+  let sm=null; root && root.traverse(o=>{ if(!sm && o.isSkinnedMesh) sm=o; }); return sm;
+}
+
+// Does this clip's skeleton match the character's? If most of its bones aren't in
+// the target skeleton, it's an external rig → needs retargeting.
+function needsRetarget(clip, targetSM){
+  const tnames=new Set(targetSM.skeleton.bones.map(b=>b.name));
+  let hit=0, tot=0;
+  clip.tracks.forEach(t=>{ const bn=t.name.split('.')[0]; tot++; if(tnames.has(bn)) hit++; });
+  return tot>0 && (hit/tot) < 0.5;
+}
+
+// Canonicalise a bone name to a humanoid key so different naming schemes match
+// (e.g. DeepMotion l_forearm_JNT  ↔  Meshy LeftForeArm  →  both "lforearm").
+function canonBone(raw){
+  let low=raw.toLowerCase(), side='';
+  if(low.includes('left')) side='l';
+  else if(low.includes('right')) side='r';
+  else if(/^l[_:.\- ]/.test(low)||/[_:.\- ]l[_:.\- ]/.test(low)) side='l';
+  else if(/^r[_:.\- ]/.test(low)||/[_:.\- ]r[_:.\- ]/.test(low)) side='r';
+  let core=low.replace(/mixamorig:?/,'').replace(/left|right/,'')
+    .replace(/_jnt$|jnt$/,'').replace(/[_:.\-| ]/g,'');
+  if(side==='l'&&core.startsWith('l')) core=core.slice(1);
+  if(side==='r'&&core.startsWith('r')) core=core.slice(1);
+  core=core.replace(/^pelvis$|^root$|^hip$/,'hips')
+    .replace(/^spine01$/,'spine1').replace(/^spine02$/,'spine2').replace(/^spine03$/,'spine3')
+    .replace(/^upperarm$/,'arm').replace(/^lowerarm$/,'forearm').replace(/^clavicle$/,'shoulder')
+    .replace(/^upperleg$|^thigh$/,'upleg').replace(/^lowerleg$|^calf$|^shin$/,'leg')
+    .replace(/^toebase$/,'toe').replace(/^ankle$/,'foot');
+  const known=['hips','spine','spine1','spine2','spine3','neck','head','shoulder','arm','forearm','hand','upleg','leg','foot','toe'];
+  return known.includes(core) ? side+core : null;
+}
+
+// Build { targetBoneName: sourceBoneName } map by canonical match.
+function buildNameMap(targetSkel, srcSkel){
+  const srcByCanon={};
+  srcSkel.bones.forEach(b=>{ const c=canonBone(b.name); if(c && !(c in srcByCanon)) srcByCanon[c]=b.name; });
+  const names={}; let matched=0;
+  targetSkel.bones.forEach(b=>{ const c=canonBone(b.name); if(c && srcByCanon[c]){ names[b.name]=srcByCanon[c]; matched++; } });
+  return {names, matched, total:targetSkel.bones.length};
+}
+
+function retargetToCharacter(targetSM, srcSM, srcScene, clip){
+  if(!THREE.SkeletonUtils || !THREE.SkeletonUtils.retargetClip){ return {error:'retarget lib not loaded'}; }
+  const {names, matched, total}=buildNameMap(targetSM.skeleton, srcSM.skeleton);
+  if(matched < 6) return {error:`only ${matched} bones matched — skeleton too different`};
+  scene.add(srcScene); srcScene.visible=false;
+  targetSM.skeleton.pose(); srcSM.skeleton.pose();
+  character.updateMatrixWorld(true); srcScene.updateMatrixWorld(true);
+  let out=null, err=null;
+  try{
+    out=THREE.SkeletonUtils.retargetClip(targetSM, srcSM, clip, { fps:30, names });
+  }catch(e){ err=e.message; console.error(e); }
+  scene.remove(srcScene);
+  return out ? {clip:out, matched, total} : {error:'retarget error: '+(err||'unknown')};
 }
 
 // Pin x/z of any position track to its first frame so the character animates
