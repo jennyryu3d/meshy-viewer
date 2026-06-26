@@ -42,6 +42,11 @@
   .status.ok{color:var(--good)} .status.err{color:var(--bad)}
   .hintbar{position:absolute;left:50%;bottom:16px;transform:translateX(-50%);color:var(--muted);
     font-size:11px;pointer-events:none;text-align:center;width:90%}
+  #timecode{position:absolute;top:14px;right:14px;z-index:5;display:none;
+    font-family:"JetBrains Mono",monospace;font-size:12px;color:var(--ink);white-space:nowrap;
+    background:rgba(20,22,27,.85);border:1px solid var(--line);border-radius:8px;padding:5px 12px;pointer-events:none}
+  #timecode b{color:var(--accent);font-weight:700}
+  @media (max-width:640px){#timecode{top:auto;right:50%;transform:translateX(50%);bottom:70px;font-size:11px;padding:4px 10px}}
   .dropveil{position:absolute;inset:0;z-index:6;display:none;align-items:center;justify-content:center;
     background:rgba(255,106,26,.08);border:2px dashed var(--accent);border-radius:0;
     color:var(--accent);font-size:15px;font-weight:600}
@@ -83,7 +88,7 @@
 
   <div class="panel" id="panel">
     <div class="panel-head" id="panelHead">
-      <h1>Meshy character viewer <span class="ver">v12</span></h1>
+      <h1>Meshy character viewer <span class="ver">v13</span></h1>
       <span class="head-actions">
         <button class="iconbtn" id="reloadBtn" title="강력 새로고침" onclick="event.stopPropagation();hardReload()">⟳</button>
         <button class="iconbtn" id="panelToggle" aria-label="toggle panel">▾</button>
@@ -115,6 +120,10 @@
           <input type="checkbox" id="driftChk" checked style="width:16px;height:16px;accent-color:var(--accent)">
           제자리 고정 (좌우 이동 제거) — 끄면 외부 모션의 이동이 살아남
         </label>
+        <label style="display:flex;align-items:center;gap:8px;margin-top:8px;font-size:12px;color:var(--ink);cursor:pointer">
+          <input type="checkbox" id="flChk" style="width:16px;height:16px;accent-color:var(--accent)">
+          발 고정 (foot-lock, 실험적) — 끄면 DeepMotion 원본 그대로
+        </label>
       </div>
 
       <div class="status" id="status">Waiting for a character…</div>
@@ -124,6 +133,7 @@
   </div>
 
   <div id="clipbar"><div class="clips" id="clips"></div></div>
+  <div id="timecode"></div>
 
   <div class="hintbar">drag to orbit · scroll to zoom · right-drag to pan · A = fit all · F = recenter origin</div>
   <div class="dropveil" id="dropveil">drop .glb to load</div>
@@ -138,7 +148,7 @@ let actions={}, clipBases={}, active=null, activeName=null;
 const FADE=0.3;
 const loader=new THREE.GLTFLoader();
 const $=id=>document.getElementById(id);
-const APP_VERSION="v12";
+const APP_VERSION="v13";
 
 // Cache-bust reload: GitHub Pages / mobile browsers cache aggressively, so a new
 // query string forces a fresh fetch of index.html (and the GLBs).
@@ -279,6 +289,7 @@ function addClips(clips,label){            // used for embedded clips in the cha
 }
 
 function driftOn(){ return $('driftChk') && $('driftChk').checked; }
+function footLockOn(){ return $('flChk') && $('flChk').checked; }
 
 // The clip the mixer actually plays. Derived from the untouched base: optionally
 // drift-stripped, then (for retargeted/external clips) foot-locked so planted feet
@@ -286,12 +297,12 @@ function driftOn(){ return $('driftChk') && $('driftChk').checked; }
 // drift strip; results are cached per (name, drift) since the IK pass isn't free.
 let playCache={};
 function buildPlayClip(name){
-  const drift=driftOn(), key=name+'|'+(drift?1:0);
+  const drift=driftOn(), fl=footLockOn(), key=name+'|'+(drift?1:0)+'|'+(fl?1:0);
   if(playCache[key]) return playCache[key];
   const base=clipBases[name];
   const c=cloneClip(base);
   if(drift) stripRootDrift(c);
-  if(base.retargeted) footLockClip(c);
+  if(fl && base.retargeted) footLockClip(c);   // off by default: faithful DeepMotion motion
   playCache[key]=c;
   return c;
 }
@@ -848,6 +859,7 @@ function wireUI(){
   $('fitBtn').onclick=()=>fitAll();
   $('resetBtn').onclick=()=>resetViewer();
   $('driftChk').onchange=()=>rebuildActions();   // live toggle: rebuild from base clips
+  $('flChk').onchange=()=>rebuildActions();      // live toggle: foot-lock on/off
   $('panelHead').onclick=()=>$('panel').classList.toggle('collapsed');
   if(innerWidth<=640) $('panel').classList.add('collapsed');  // start collapsed on phones
   addEventListener('keydown',e=>{
@@ -870,7 +882,18 @@ function wireUI(){
 }
 
 function onResize(){camera.aspect=innerWidth/innerHeight;camera.updateProjectionMatrix();renderer.setSize(innerWidth,innerHeight);}
-function animate(){requestAnimationFrame(animate);const dt=clock.getDelta();if(mixer)mixer.update(dt);controls.update();renderer.render(scene,camera);}
+// On-screen timecode: clip name · current time / duration · frame index (fps inferred from
+// the clip's densest track). Lets you report exact moments.
+function updateTimecode(){
+  const el=$('timecode'); if(!el) return;
+  const clip=active && active.getClip && active.getClip();
+  if(!clip){ el.style.display='none'; return; }
+  if(!clip.__fps){ let m=0; clip.tracks.forEach(t=>{ if(t.times.length>m) m=t.times.length; }); clip.__fps=clip.duration>0?(m-1)/clip.duration:30; }
+  const t=active.time||0, frame=Math.round(t*clip.__fps), total=Math.round(clip.duration*clip.__fps);
+  el.style.display='block';
+  el.innerHTML=`${activeName}　·　t <b>${t.toFixed(2)}</b> / ${clip.duration.toFixed(2)}s　·　f <b>${frame}</b> / ${total}`;
+}
+function animate(){requestAnimationFrame(animate);const dt=clock.getDelta();if(mixer)mixer.update(dt);controls.update();renderer.render(scene,camera);updateTimecode();}
 </script>
 </body>
 </html>

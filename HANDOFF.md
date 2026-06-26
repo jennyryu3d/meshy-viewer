@@ -25,6 +25,17 @@
    높이 비율(`ptRest.y/psRest.y`)로 스케일 (월드 높이는 armature 스케일이 섞여 틀림 — Meshy
    Armature는 ×0.01). 부모 world 회전으로 이동 방향 재표현. drift off 시 좌우 이동 살아남.
 
+## v13 — 발 고정 기본 OFF(충실 모드) + 타임코드 표시
+사용자 피드백: IK 처리(발 고정/무릎 pole)가 전체 자연스러움을 떨어뜨림 → 발이 미끄러져도
+DeepMotion 원본 그대로가 더 나음.
+- **발 고정 체크박스(`flChk`) 추가, 기본 OFF.** OFF면 `footLockClip` 미실행 → v9 충실 모드
+  (rest-pose 보정 리타겟 + hips 접지 + 좌측 다리 매칭만, IK 없음). 켜면 v10~12의 발 고정/무릎
+  pole IK 적용. `buildPlayClip` 캐시키에 fl 상태 포함, 토글 시 `rebuildActions`.
+- `detectSourceContacts`는 여전히 리타겟 시 계산(토글 켤 때 재리타겟 없이 쓰려고). off여도 비용
+  약간 있음(소스 1패스). 싫으면 lazy화 가능하나 소스 GLB는 재생 시점에 없으므로 리타겟 때 해야 함.
+- **타임코드 HUD(`#timecode`)**: 재생 중 `클립명 · t 현재/총 s · f 프레임/총`. fps는 클립 최대
+  트랙 키수/duration으로 추정. animate()에서 `updateTimecode()`. 우상단(모바일은 하단 중앙).
+
 ## v12 — 무릎 역관절 제거 (knee pole IK)
 v11에서도 무릎 역관절이 미세하게 남음. 원인: 회전 리타게팅(C 켤레)이 무릎 hinge 축을 완벽히
 보존 못해 일부 프레임 무릎이 반대로 굽음(타깃 무릎 vs 소스 무릎 일치도 0.92, 가끔 반대).
