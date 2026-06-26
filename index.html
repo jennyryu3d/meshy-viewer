@@ -83,7 +83,7 @@
 
   <div class="panel" id="panel">
     <div class="panel-head" id="panelHead">
-      <h1>Meshy character viewer <span class="ver">v11</span></h1>
+      <h1>Meshy character viewer <span class="ver">v12</span></h1>
       <span class="head-actions">
         <button class="iconbtn" id="reloadBtn" title="강력 새로고침" onclick="event.stopPropagation();hardReload()">⟳</button>
         <button class="iconbtn" id="panelToggle" aria-label="toggle panel">▾</button>
@@ -138,7 +138,7 @@ let actions={}, clipBases={}, active=null, activeName=null;
 const FADE=0.3;
 const loader=new THREE.GLTFLoader();
 const $=id=>document.getElementById(id);
-const APP_VERSION="v11";
+const APP_VERSION="v12";
 
 // Cache-bust reload: GitHub Pages / mobile browsers cache aggressively, so a new
 // query string forces a fresh fetch of index.html (and the GLBs).
@@ -565,30 +565,50 @@ function aimBone(bone, endBone, targetW){
   if(from.lengthSq()<1e-12 || to.lengthSq()<1e-12) return;
   applyWorldDeltaQuat(bone, new THREE.Quaternion().setFromUnitVectors(from.normalize(), to.normalize()));
 }
-// Analytic 2-bone IK (aim → bend knee in the FK bend-plane → re-aim) placing `end` at targetW.
-function twoBoneIK(upper, lower, end, targetW){
-  let root=upper.getWorldPosition(new THREE.Vector3());
-  let mid=lower.getWorldPosition(new THREE.Vector3());
-  let tip=end.getWorldPosition(new THREE.Vector3());
-  const l1=root.distanceTo(mid), l2=mid.distanceTo(tip);
-  const tgt=targetW.clone(); const dir=tgt.clone().sub(root); let d=dir.length();
-  // never let the leg reach full extension — keeps a slight knee bend so the IK can't pass
-  // through the straight-leg singularity and pop the knee into reverse.
-  const dc=THREE.MathUtils.clamp(d, Math.abs(l1-l2)+1e-4, (l1+l2)*0.985);
-  if(d>1e-6){ tgt.copy(root).add(dir.multiplyScalar(dc/d)); d=dc; }
-  aimBone(upper, end, tgt);
-  root=upper.getWorldPosition(new THREE.Vector3()); mid=lower.getWorldPosition(new THREE.Vector3()); tip=end.getWorldPosition(new THREE.Vector3());
-  const want=Math.acos(THREE.MathUtils.clamp((l1*l1+l2*l2-d*d)/(2*l1*l2),-1,1)); // interior knee angle
-  const v1=root.clone().sub(mid), v2=tip.clone().sub(mid);
-  let axis=new THREE.Vector3().crossVectors(v1,v2);
-  if(axis.lengthSq()<1e-9){ axis.crossVectors(v2,new THREE.Vector3(0,0,1)); if(axis.lengthSq()<1e-9) axis.set(1,0,0); }
-  applyWorldDeltaQuat(lower, new THREE.Quaternion().setFromAxisAngle(axis.normalize(), want-v1.angleTo(v2)));
-  aimBone(upper, end, tgt);
+// Rotate `bone` about `pivot` so its child world point `childPos` moves onto `targetPos`.
+function aimBoneTo(bone, childPos, targetPos, pivot){
+  const from=childPos.clone().sub(pivot), to=targetPos.clone().sub(pivot);
+  if(from.lengthSq()<1e-12 || to.lengthSq()<1e-12) return;
+  applyWorldDeltaQuat(bone, new THREE.Quaternion().setFromUnitVectors(from.normalize(), to.normalize()));
+}
+// Analytic 2-bone IK with an explicit POLE: the knee is forced into the (hip→ankle, pole) plane
+// on the pole side, which is exactly what stops it inverting — the knee can only ever bend toward
+// `poleW`. Places `end` at `targetW`; reach is clamped below full extension to avoid the
+// straight-leg singularity. With targetW = the current ankle, this only re-bends the knee
+// (hip & ankle unchanged) — i.e. a pure de-inversion. With a lock target, it also pins the foot.
+function twoBoneIK(upper, lower, end, targetW, poleW){
+  const root=upper.getWorldPosition(new THREE.Vector3());
+  const mid=lower.getWorldPosition(new THREE.Vector3());
+  const tip=end.getWorldPosition(new THREE.Vector3());
+  const a=root.distanceTo(mid), b=mid.distanceTo(tip);
+  const dir=targetW.clone().sub(root); if(dir.lengthSq()<1e-12) return;
+  const d=THREE.MathUtils.clamp(dir.length(), Math.abs(a-b)+1e-4, (a+b)*0.985); dir.normalize();
+  const tgt=root.clone().addScaledVector(dir,d);
+  // pole, projected perpendicular to the hip→ankle axis (the plane the knee bends in)
+  let pole=(poleW?poleW.clone():mid.clone().sub(root));
+  pole.addScaledVector(dir, -pole.dot(dir));
+  if(pole.lengthSq()<1e-9){ pole=mid.clone().sub(root); pole.addScaledVector(dir,-pole.dot(dir)); }
+  if(pole.lengthSq()<1e-9) return; pole.normalize();
+  const x=(a*a - b*b + d*d)/(2*d), h=Math.sqrt(Math.max(0, a*a - x*x));
+  const desiredKnee=root.clone().addScaledVector(dir,x).addScaledVector(pole,h);
+  aimBoneTo(upper, mid, desiredKnee, root); upper.updateMatrixWorld(true);
+  const mid2=lower.getWorldPosition(new THREE.Vector3()), tip2=end.getWorldPosition(new THREE.Vector3());
+  aimBoneTo(lower, tip2, tgt, mid2);
 }
 // Merge contact gaps shorter than fillGap, then drop contact runs shorter than minRun.
 function smoothBool(a,fillGap,minRun){ const n=a.length; let f=0;
   while(f<n){ if(a[f]){f++;continue;} let g=f; while(g<n&&!a[g])g++; if(g-f<fillGap&&f>0&&g<n) for(let k=f;k<g;k++)a[k]=true; f=g; }
   f=0; while(f<n){ if(!a[f]){f++;continue;} let g=f; while(g<n&&a[g])g++; if(g-f<minRun) for(let k=f;k<g;k++)a[k]=false; f=g; }
+}
+// One-pass temporal smoothing of a quaternion array: nudge each key toward the slerp-midpoint of
+// its neighbours by `strength` (sign-aware so it can't take the long way). Tames IK jitter.
+function smoothQuats(a, strength){
+  if(a.length<3) return;
+  const out=a.map(q=>q.clone());
+  for(let i=1;i<a.length-1;i++){ const p=a[i-1].clone(); if(p.dot(a[i])<0) p.set(-p.x,-p.y,-p.z,-p.w);
+    const n=a[i+1].clone(); if(n.dot(a[i])<0) n.set(-n.x,-n.y,-n.z,-n.w);
+    out[i]=a[i].clone().slerp(p.slerp(n,0.5), strength); }
+  for(let i=0;i<a.length;i++) a[i].copy(out[i]);
 }
 function writeQuatTrack(clip, boneName, times, quats){
   // Enforce sign continuity (q and -q are the same rotation): a sign flip between keys would
@@ -604,33 +624,39 @@ function writeQuatTrack(clip, boneName, times, quats){
 // capture) rather than the noisier retargeted target. Returns { lfoot:bool[], rfoot:bool[] }
 // aligned to the source track keyframes — the play-time foot-lock uses this to know exactly
 // when to pin vs let the foot step, which dodges the freeze-the-step / slide tradeoff.
+// Returns { contacts:{lfoot,rfoot}, poles:{lfoot,rfoot} } from the source: per-foot ground-contact
+// frames, AND the per-frame world direction the source knee bends (its offset from the hip→ankle
+// line). The source is anatomically valid and faces the same way as the retargeted target, so that
+// direction is exactly the pole the target knee should bend toward — the reliable cure for inversion.
 function detectSourceContacts(srcSkel, srcScene, clip){
  try{
   const find=k=>srcSkel.bones.find(b=>canonBone(b.name)===k);
-  const feet=[{c:'lfoot',foot:find('lfoot'),toe:find('ltoe'),up:find('lupleg'),kn:find('lleg')},
-              {c:'rfoot',foot:find('rfoot'),toe:find('rtoe')}].filter(x=>x.foot);
-  if(!feet.length) return null;
+  const legs=[{c:'lfoot',foot:find('lfoot'),toe:find('ltoe'),up:find('lupleg'),kn:find('lleg')},
+              {c:'rfoot',foot:find('rfoot'),toe:find('rtoe'),up:find('rupleg'),kn:find('rleg')}].filter(x=>x.foot&&x.up&&x.kn);
+  if(!legs.length) return null;
   const ref=clip.tracks.find(t=>/quaternion$/.test(t.name)); if(!ref) return null;
   const times=ref.times, nf=times.length;
   const mx=new THREE.AnimationMixer(srcScene); mx.clipAction(clip).play();
-  const pos=feet.map(()=>[]), hgt=feet.map(()=>[]);
+  const pos=legs.map(()=>[]), hgt=legs.map(()=>[]), pol=legs.map(()=>[]);
   for(let f=0;f<nf;f++){ mx.setTime(times[f]); srcScene.updateMatrixWorld(true);
-    feet.forEach((ft,i)=>{ const a=ft.foot.getWorldPosition(new THREE.Vector3()); let h=a.y;
-      if(ft.toe) h=Math.min(h, ft.toe.getWorldPosition(new THREE.Vector3()).y);
-      pos[i].push([a.x,a.y,a.z]); hgt[i].push(h); }); }
-  let legLen=0.8; const f0=feet[0];
-  if(f0.up&&f0.kn){ srcScene.updateMatrixWorld(true);
-    legLen=f0.up.getWorldPosition(new THREE.Vector3()).distanceTo(f0.kn.getWorldPosition(new THREE.Vector3()))
-          +f0.kn.getWorldPosition(new THREE.Vector3()).distanceTo(f0.foot.getWorldPosition(new THREE.Vector3())); }
+    legs.forEach((L,i)=>{ const A=L.foot.getWorldPosition(new THREE.Vector3()); let h=A.y;
+      if(L.toe) h=Math.min(h, L.toe.getWorldPosition(new THREE.Vector3()).y);
+      pos[i].push([A.x,A.y,A.z]); hgt[i].push(h);
+      const H=L.up.getWorldPosition(new THREE.Vector3()), K=L.kn.getWorldPosition(new THREE.Vector3());
+      const ha=A.clone().sub(H), hk=K.clone().sub(H); const t=ha.lengthSq()>1e-9?hk.dot(ha)/ha.lengthSq():0;
+      const p=hk.sub(ha.multiplyScalar(t)); pol[i].push(p.lengthSq()>1e-9?[p.x,p.y,p.z]:null); }); }
+  srcScene.updateMatrixWorld(true); const f0=legs[0];
+  const legLen=f0.up.getWorldPosition(new THREE.Vector3()).distanceTo(f0.kn.getWorldPosition(new THREE.Vector3()))
+              +f0.kn.getWorldPosition(new THREE.Vector3()).distanceTo(f0.foot.getWorldPosition(new THREE.Vector3()));
   mx.stopAllAction(); mx.uncacheClip(clip);
   const allH=[]; hgt.forEach(s=>s.forEach(h=>allH.push(h))); allH.sort((a,b)=>a-b); const grd=allH[Math.floor(allH.length*0.2)];
-  const dt=(times[nf-1]-times[0])/(nf-1)||1, res={};
-  feet.forEach((ft,i)=>{ const c=new Array(nf).fill(false);
+  const dt=(times[nf-1]-times[0])/(nf-1)||1, contacts={}, poles={};
+  legs.forEach((L,i)=>{ const c=new Array(nf).fill(false);
     for(let f=1;f<nf-1;f++){ const a=pos[i][f-1],b=pos[i][f+1]; const sp=Math.hypot(a[0]-b[0],a[2]-b[2])/(2*dt);
       c[f]= hgt[i][f]<grd+legLen*0.12 && sp<legLen*0.7; }
     smoothBool(c, Math.max(1,Math.round(nf*0.012)), Math.max(3,Math.round(nf*0.015)));
-    res[ft.c]=c; });
-  return res;
+    contacts[L.c]=c; poles[L.c]=pol[i]; });
+  return {contacts, poles};
  }catch(e){ console.error('detectSourceContacts failed',e); return null; }
 }
 function footLockClip(clip){
@@ -643,15 +669,29 @@ function footLockClip(clip){
   const ref=clip.tracks.find(t=>t.name===legs[0].lower.name+'.quaternion'); if(!ref) return;
   const times=ref.times, nf=times.length;
   const tmp=new THREE.AnimationMixer(character); tmp.clipAction(clip).play();
-  const data=legs.map(()=>({ankle:[],h:[]}));
-  // PASS 1 — sample FK ankle world position + foot (lowest of ankle/toe) height per frame.
+  const data=legs.map(()=>({ankle:[],h:[],H:[],K:[]}));
+  const fwdArr=[];   // body-forward per frame (for the knee pole)
+  const UP=new THREE.Vector3(0,1,0);
+  // PASS 1 — sample hip/knee/ankle world positions, foot height, and body facing per frame.
   for(let f=0;f<nf;f++){ tmp.setTime(times[f]); character.updateMatrixWorld(true);
     legs.forEach((L,li)=>{ const a=L.foot.getWorldPosition(new THREE.Vector3()); let hy=a.y;
       if(L.toe) hy=Math.min(hy, L.toe.getWorldPosition(new THREE.Vector3()).y);
-      data[li].ankle.push([a.x,a.y,a.z]); data[li].h.push(hy); }); }
-  tmp.setTime(times[0]); character.updateMatrixWorld(true);
-  const u0=legs[0].upper.getWorldPosition(new THREE.Vector3()), m0=legs[0].lower.getWorldPosition(new THREE.Vector3()), e0=legs[0].foot.getWorldPosition(new THREE.Vector3());
-  const legLenW=u0.distanceTo(m0)+m0.distanceTo(e0);
+      data[li].ankle.push([a.x,a.y,a.z]); data[li].h.push(hy);
+      data[li].H.push(L.upper.getWorldPosition(new THREE.Vector3())); data[li].K.push(L.lower.getWorldPosition(new THREE.Vector3())); });
+    let fwd=null;
+    if(legs.length>1){ fwd=new THREE.Vector3().crossVectors(UP, data[1].H[f].clone().sub(data[0].H[f]));
+      fwd=fwd.lengthSq()>1e-9 ? fwd.normalize() : null; }
+    fwdArr.push(fwd); }
+  // Per-leg pole sign: orient the body-forward so it matches the knee's OWN dominant bend
+  // direction across the clip. Then forcing the knee toward this pole flips the minority of
+  // inverted frames to the correct side while leaving the (majority) correct frames untouched.
+  const poleSign=legs.map((L,li)=>{ let s=0;
+    for(let f=0;f<nf;f++){ const fwd=fwdArr[f]; if(!fwd) continue;
+      const H=data[li].H[f], K=data[li].K[f], A=new THREE.Vector3(...data[li].ankle[f]);
+      const ha=A.clone().sub(H), hk=K.clone().sub(H); const t=ha.lengthSq()>1e-9?hk.dot(ha)/ha.lengthSq():0;
+      const perp=hk.sub(ha.multiplyScalar(t)); if(perp.lengthSq()>1e-6) s+=perp.dot(fwd); }
+    return s>=0?1:-1; });
+  const legLenW=data[0].H[0].distanceTo(data[0].K[0])+data[0].K[0].distanceTo(new THREE.Vector3(...data[0].ankle[0]));
   const lowAll=[]; for(let f=0;f<nf;f++) lowAll.push(Math.min(...legs.map((_,li)=>data[li].h[f])));
   const groundY=[...lowAll].sort((a,b)=>a-b)[Math.floor(nf*0.2)];
   // Contact thresholds — deliberately conservative. Only a foot clearly near the floor AND
@@ -666,9 +706,9 @@ function footLockClip(clip){
   const FL=(typeof window!=='undefined'&&window.FL_CFG)||{};
   const bandMul=FL.bandMul??0.08, speedMul=FL.speedMul??1.0, rampFrac=FL.rampFrac??0.006, gapFrac=FL.gapFrac??0.012, runFrac=FL.runFrac??0.02;
   const hBand=groundY+legLenW*bandMul, sThresh=legLenW*speedMul;
-  const srcC=clip.footContacts;   // source-derived plant timing (preferred), else detect from target
+  const SC=clip.footContacts;   // {contacts,poles} from source (preferred), else detect from target
   legs.forEach((L,li)=>{ const D=data[li]; const canon=canonBone(L.foot.name);
-    if(srcC && srcC[canon] && srcC[canon].length===nf){ D.contact=srcC[canon].slice(); return; }
+    if(SC && SC.contacts && SC.contacts[canon] && SC.contacts[canon].length===nf){ D.contact=SC.contacts[canon].slice(); return; }
     D.contact=new Array(nf).fill(false);
     for(let f=0;f<nf;f++){ let spd=0; if(f>0&&f<nf-1){ const a=D.ankle[f-1],b=D.ankle[f+1], dt=(times[f+1]-times[f-1])||1; spd=Math.hypot(a[0]-b[0],a[2]-b[2])/dt; }
       D.contact[f]= D.h[f]<hBand && spd<sThresh; }
@@ -686,15 +726,26 @@ function footLockClip(clip){
         let w=r<ramp?r/ramp:1; w=w*w*(3-2*w);   // smoothstep: zero velocity at ramp ends → no pop
         D.w[k]=w; D.tgt[k]=lock; }
       f=g; } });
-  // PASS 2 — re-pose FK each frame, IK the leg to the (blended) locked ankle, record leg quats.
+  // PASS 2 — for EVERY frame, re-solve each leg with the forward knee pole (de-inversion) and,
+  // where the foot is planted (w>0), to the blended lock target (anti-skate). Non-locked frames
+  // target the current ankle, so only the knee is corrected — hip and foot are preserved.
   const rec=legs.map(()=>({u:[],l:[]}));
   for(let f=0;f<nf;f++){ tmp.setTime(times[f]); character.updateMatrixWorld(true);
-    legs.forEach((L,li)=>{ const D=data[li], w=D.w[f];
-      if(w>0){ const a=L.foot.getWorldPosition(new THREE.Vector3()), t=D.tgt[f];
-        twoBoneIK(L.upper,L.lower,L.foot, new THREE.Vector3(a.x+(t[0]-a.x)*w, a.y+(t[1]-a.y)*w, a.z+(t[2]-a.z)*w)); }
+    const fwd=fwdArr[f];
+    legs.forEach((L,li)=>{ const D=data[li], w=D.w[f]||0;
+      const a=L.foot.getWorldPosition(new THREE.Vector3());
+      const target=(w>0) ? (()=>{ const t=D.tgt[f]; return new THREE.Vector3(a.x+(t[0]-a.x)*w, a.y+(t[1]-a.y)*w, a.z+(t[2]-a.z)*w); })() : a;
+      // pole = the source knee's own bend direction this frame (ground truth); fall back to the
+      // sign-corrected body-forward when the source pole is unavailable.
+      const sp=SC && SC.poles && SC.poles[canonBone(L.foot.name)] && SC.poles[canonBone(L.foot.name)][f];
+      const pole=sp ? new THREE.Vector3(sp[0],sp[1],sp[2]) : (fwd ? fwd.clone().multiplyScalar(poleSign[li]) : null);
+      if(pole || w>0) twoBoneIK(L.upper,L.lower,L.foot, target, pole);
       rec[li].u.push(L.upper.quaternion.clone()); rec[li].l.push(L.lower.quaternion.clone()); }); }
   tmp.stopAllAction(); tmp.uncacheClip(clip);
-  legs.forEach((L,li)=>{ writeQuatTrack(clip,L.upper.name,times,rec[li].u); writeQuatTrack(clip,L.lower.name,times,rec[li].l); });
+  // The per-frame IK re-solve adds a little high-frequency knee/hip jitter; one light smoothing
+  // pass pulls it back to the source's smoothness without blurring the (slow) leg motion.
+  legs.forEach((L,li)=>{ smoothQuats(rec[li].u,0.5); smoothQuats(rec[li].l,0.5);
+    writeQuatTrack(clip,L.upper.name,times,rec[li].u); writeQuatTrack(clip,L.lower.name,times,rec[li].l); });
  }catch(e){ console.error('footLock failed',e); }
 }
 
