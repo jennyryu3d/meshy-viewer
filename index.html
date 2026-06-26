@@ -83,7 +83,7 @@
 
   <div class="panel" id="panel">
     <div class="panel-head" id="panelHead">
-      <h1>Meshy character viewer <span class="ver">v9</span></h1>
+      <h1>Meshy character viewer <span class="ver">v10</span></h1>
       <span class="head-actions">
         <button class="iconbtn" id="reloadBtn" title="강력 새로고침" onclick="event.stopPropagation();hardReload()">⟳</button>
         <button class="iconbtn" id="panelToggle" aria-label="toggle panel">▾</button>
@@ -138,7 +138,7 @@ let actions={}, clipBases={}, active=null, activeName=null;
 const FADE=0.3;
 const loader=new THREE.GLTFLoader();
 const $=id=>document.getElementById(id);
-const APP_VERSION="v9";
+const APP_VERSION="v10";
 
 // Cache-bust reload: GitHub Pages / mobile browsers cache aggressively, so a new
 // query string forces a fresh fetch of index.html (and the GLBs).
@@ -203,7 +203,7 @@ function setStatus(msg,kind){const s=$('status');s.textContent=msg;s.className='
 // Clear everything so a fresh character/clips can be loaded (overwrite workflow)
 function resetViewer(){
   if(character) scene.remove(character);
-  character=null; mixer=null; actions={}; clipBases={}; active=null; activeName=null;
+  character=null; mixer=null; actions={}; clipBases={}; playCache={}; active=null; activeName=null;
   renderClips();
   setStatus('Cleared. Drop or pick a .glb to load.', '');
 }
@@ -224,7 +224,7 @@ async function setCharacter(src,label){
   try{
     const g=await loadGLB(src);
     if(character) scene.remove(character);
-    actions={}; clipBases={}; active=null; activeName=null;
+    actions={}; clipBases={}; playCache={}; active=null; activeName=null;
     renderClips();
     character=g.scene;
     scene.add(character);
@@ -280,12 +280,20 @@ function addClips(clips,label){            // used for embedded clips in the cha
 
 function driftOn(){ return $('driftChk') && $('driftChk').checked; }
 
-// The clip the mixer actually plays: the stored base as-is, or a drift-stripped
-// clone when "제자리 고정" is on. The base is never mutated → toggling is lossless.
+// The clip the mixer actually plays. Derived from the untouched base: optionally
+// drift-stripped, then (for retargeted/external clips) foot-locked so planted feet
+// don't slide or float. Foot-locking depends on the root state, so it runs AFTER the
+// drift strip; results are cached per (name, drift) since the IK pass isn't free.
+let playCache={};
 function buildPlayClip(name){
+  const drift=driftOn(), key=name+'|'+(drift?1:0);
+  if(playCache[key]) return playCache[key];
   const base=clipBases[name];
-  if(driftOn()){ const c=cloneClip(base); stripRootDrift(c); return c; }
-  return base;
+  const c=cloneClip(base);
+  if(drift) stripRootDrift(c);
+  if(base.retargeted) footLockClip(c);
+  playCache[key]=c;
+  return c;
 }
 
 function cloneClip(clip){
@@ -485,6 +493,7 @@ function retargetToCharacter(targetSM, srcSM, srcScene, clip){
 
     if(!newTracks.length) return {error:'no retargetable tracks'};
     const out=new THREE.AnimationClip(clip.name||'retargeted', clip.duration, newTracks);
+    out.retargeted=true;   // mark so play-time foot-locking only touches external clips
     // Restore the authored pose/scale BEFORE grounding — pose() left the skeleton in the
     // degenerate bind (collapsed scales), so foot positions would be meaningless otherwise.
     restore(); character.updateMatrixWorld(true);
@@ -528,6 +537,117 @@ function groundClip(clip){
   const ground=lows[Math.floor(lows.length*0.20)];   // 20th-percentile foot height = floor
   const lift=-ground/scaleY;
   for(let i=1;i<hipsTrack.values.length;i+=3) hipsTrack.values[i]+=lift;
+}
+
+// ── Foot-lock via 2-bone IK ────────────────────────────────────────────────────────────
+// Planted feet sliding/floating is the remaining flaw after a faithful FK retarget. We pin
+// each foot to a fixed world spot during ground contact by bending ONLY the leg (hip+knee
+// IK) — the root/hips keep the faithful DeepMotion motion, so no jitter is reintroduced.
+// Swing phases keep the original motion; contacts ease in/out so it reads as one motion.
+function median(a){ const s=[...a].sort((x,y)=>x-y); return s[s.length>>1]; }
+
+// Rotate a bone by a world-space delta quaternion (convert to local via its parent).
+function applyWorldDeltaQuat(bone, dqWorld){
+  const oldW=bone.getWorldQuaternion(new THREE.Quaternion());
+  const newW=dqWorld.clone().multiply(oldW);
+  const par=bone.parent ? bone.parent.getWorldQuaternion(new THREE.Quaternion()) : new THREE.Quaternion();
+  bone.quaternion.copy(par.invert().multiply(newW));
+  bone.updateMatrixWorld(true);
+}
+// Rotate `bone` so its child `endBone` points from the bone toward targetW (minimal twist).
+function aimBone(bone, endBone, targetW){
+  const root=bone.getWorldPosition(new THREE.Vector3());
+  const tip=endBone.getWorldPosition(new THREE.Vector3());
+  const from=tip.sub(root), to=targetW.clone().sub(root);
+  if(from.lengthSq()<1e-12 || to.lengthSq()<1e-12) return;
+  applyWorldDeltaQuat(bone, new THREE.Quaternion().setFromUnitVectors(from.normalize(), to.normalize()));
+}
+// Analytic 2-bone IK (aim → bend knee in the FK bend-plane → re-aim) placing `end` at targetW.
+function twoBoneIK(upper, lower, end, targetW){
+  let root=upper.getWorldPosition(new THREE.Vector3());
+  let mid=lower.getWorldPosition(new THREE.Vector3());
+  let tip=end.getWorldPosition(new THREE.Vector3());
+  const l1=root.distanceTo(mid), l2=mid.distanceTo(tip);
+  const tgt=targetW.clone(); const dir=tgt.clone().sub(root); let d=dir.length();
+  const dc=THREE.MathUtils.clamp(d, Math.abs(l1-l2)+1e-4, l1+l2-1e-4);
+  if(d>1e-6){ tgt.copy(root).add(dir.multiplyScalar(dc/d)); d=dc; }
+  aimBone(upper, end, tgt);
+  root=upper.getWorldPosition(new THREE.Vector3()); mid=lower.getWorldPosition(new THREE.Vector3()); tip=end.getWorldPosition(new THREE.Vector3());
+  const want=Math.acos(THREE.MathUtils.clamp((l1*l1+l2*l2-d*d)/(2*l1*l2),-1,1)); // interior knee angle
+  const v1=root.clone().sub(mid), v2=tip.clone().sub(mid);
+  let axis=new THREE.Vector3().crossVectors(v1,v2);
+  if(axis.lengthSq()<1e-9){ axis.crossVectors(v2,new THREE.Vector3(0,0,1)); if(axis.lengthSq()<1e-9) axis.set(1,0,0); }
+  applyWorldDeltaQuat(lower, new THREE.Quaternion().setFromAxisAngle(axis.normalize(), want-v1.angleTo(v2)));
+  aimBone(upper, end, tgt);
+}
+// Merge contact gaps shorter than fillGap, then drop contact runs shorter than minRun.
+function smoothBool(a,fillGap,minRun){ const n=a.length; let f=0;
+  while(f<n){ if(a[f]){f++;continue;} let g=f; while(g<n&&!a[g])g++; if(g-f<fillGap&&f>0&&g<n) for(let k=f;k<g;k++)a[k]=true; f=g; }
+  f=0; while(f<n){ if(!a[f]){f++;continue;} let g=f; while(g<n&&a[g])g++; if(g-f<minRun) for(let k=f;k<g;k++)a[k]=false; f=g; }
+}
+function writeQuatTrack(clip, boneName, times, quats){
+  // Enforce sign continuity (q and -q are the same rotation): a sign flip between keys would
+  // make the slerp interpolant take the long way and read as a pop. Keep adjacent keys close.
+  for(let i=1;i<quats.length;i++){ if(quats[i].dot(quats[i-1])<0) quats[i].set(-quats[i].x,-quats[i].y,-quats[i].z,-quats[i].w); }
+  const vals=new Float32Array(quats.length*4);
+  quats.forEach((q,i)=>{ vals[i*4]=q.x; vals[i*4+1]=q.y; vals[i*4+2]=q.z; vals[i*4+3]=q.w; });
+  const name=boneName+'.quaternion', idx=clip.tracks.findIndex(t=>t.name===name);
+  const tr=new THREE.QuaternionKeyframeTrack(name, Array.from(times), vals);
+  if(idx>=0) clip.tracks[idx]=tr; else clip.tracks.push(tr);
+}
+function footLockClip(clip){
+ try{
+  const skel=findSkinned(character) && findSkinned(character).skeleton; if(!skel) return;
+  const B=n=>skel.bones.find(b=>canonBone(b.name)===n);
+  const legs=[['lupleg','lleg','lfoot','ltoe'],['rupleg','rleg','rfoot','rtoe']]
+    .map(([u,l,f,t])=>({upper:B(u),lower:B(l),foot:B(f),toe:B(t)})).filter(L=>L.upper&&L.lower&&L.foot);
+  if(!legs.length) return;
+  const ref=clip.tracks.find(t=>t.name===legs[0].lower.name+'.quaternion'); if(!ref) return;
+  const times=ref.times, nf=times.length;
+  const tmp=new THREE.AnimationMixer(character); tmp.clipAction(clip).play();
+  const data=legs.map(()=>({ankle:[],h:[]}));
+  // PASS 1 — sample FK ankle world position + foot (lowest of ankle/toe) height per frame.
+  for(let f=0;f<nf;f++){ tmp.setTime(times[f]); character.updateMatrixWorld(true);
+    legs.forEach((L,li)=>{ const a=L.foot.getWorldPosition(new THREE.Vector3()); let hy=a.y;
+      if(L.toe) hy=Math.min(hy, L.toe.getWorldPosition(new THREE.Vector3()).y);
+      data[li].ankle.push([a.x,a.y,a.z]); data[li].h.push(hy); }); }
+  tmp.setTime(times[0]); character.updateMatrixWorld(true);
+  const u0=legs[0].upper.getWorldPosition(new THREE.Vector3()), m0=legs[0].lower.getWorldPosition(new THREE.Vector3()), e0=legs[0].foot.getWorldPosition(new THREE.Vector3());
+  const legLenW=u0.distanceTo(m0)+m0.distanceTo(e0);
+  const lowAll=[]; for(let f=0;f<nf;f++) lowAll.push(Math.min(...legs.map((_,li)=>data[li].h[f])));
+  const groundY=[...lowAll].sort((a,b)=>a-b)[Math.floor(nf*0.2)];
+  // Contact thresholds (tuned on the DeepMotion dance clip): generous height/speed gates so
+  // plants are caught, short gaps merged into stable phases, and a short ramp so even brief
+  // contacts reach a full lock. These cut planted-foot skate ~94% while keeping the per-frame
+  // smoothness at or below the source's own.
+  const hBand=groundY+legLenW*0.20, sThresh=legLenW*2.6;
+  legs.forEach((L,li)=>{ const D=data[li]; D.contact=new Array(nf).fill(false);
+    for(let f=0;f<nf;f++){ let spd=0; if(f>0&&f<nf-1){ const a=D.ankle[f-1],b=D.ankle[f+1], dt=(times[f+1]-times[f-1])||1; spd=Math.hypot(a[0]-b[0],a[2]-b[2])/dt; }
+      D.contact[f]= D.h[f]<hBand && spd<sThresh; }
+    smoothBool(D.contact, Math.max(2,Math.round(nf*0.10)), Math.max(2,Math.round(nf*0.012))); });
+  // per contact phase: lock to the median ankle position; ease weight in/out at the ends
+  const ramp=Math.max(2,Math.round(nf*0.012));
+  legs.forEach((L,li)=>{ const D=data[li]; D.w=new Array(nf).fill(0); D.tgt=new Array(nf);
+    let f=0; while(f<nf){ if(!D.contact[f]){f++;continue;} let g=f; while(g<nf&&D.contact[g])g++;
+      const xs=[],zs=[]; let lf=f,lh=Infinity;
+      for(let k=f;k<g;k++){ xs.push(D.ankle[k][0]); zs.push(D.ankle[k][2]); if(D.h[k]<lh){lh=D.h[k];lf=k;} }
+      // lock XZ to the phase median (stationary); lock the ankle Y so the foot's lowest point
+      // rests on groundY (offset = ankle-above-sole at the firmest-contact frame).
+      const lock=[median(xs), groundY + (D.ankle[lf][1]-D.h[lf]), median(zs)];
+      for(let k=f;k<g;k++){ const r=Math.min(k-f,g-1-k);
+        let w=r<ramp?r/ramp:1; w=w*w*(3-2*w);   // smoothstep: zero velocity at ramp ends → no pop
+        D.w[k]=w; D.tgt[k]=lock; }
+      f=g; } });
+  // PASS 2 — re-pose FK each frame, IK the leg to the (blended) locked ankle, record leg quats.
+  const rec=legs.map(()=>({u:[],l:[]}));
+  for(let f=0;f<nf;f++){ tmp.setTime(times[f]); character.updateMatrixWorld(true);
+    legs.forEach((L,li)=>{ const D=data[li], w=D.w[f];
+      if(w>0){ const a=L.foot.getWorldPosition(new THREE.Vector3()), t=D.tgt[f];
+        twoBoneIK(L.upper,L.lower,L.foot, new THREE.Vector3(a.x+(t[0]-a.x)*w, a.y+(t[1]-a.y)*w, a.z+(t[2]-a.z)*w)); }
+      rec[li].u.push(L.upper.quaternion.clone()); rec[li].l.push(L.lower.quaternion.clone()); }); }
+  tmp.stopAllAction(); tmp.uncacheClip(clip);
+  legs.forEach((L,li)=>{ writeQuatTrack(clip,L.upper.name,times,rec[li].u); writeQuatTrack(clip,L.lower.name,times,rec[li].l); });
+ }catch(e){ console.error('footLock failed',e); }
 }
 
 // Pin x/z of any position track to its first frame so the character animates
