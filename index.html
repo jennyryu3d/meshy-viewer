@@ -83,7 +83,7 @@
 
   <div class="panel" id="panel">
     <div class="panel-head" id="panelHead">
-      <h1>Meshy character viewer <span class="ver">v8</span></h1>
+      <h1>Meshy character viewer <span class="ver">v9</span></h1>
       <span class="head-actions">
         <button class="iconbtn" id="reloadBtn" title="강력 새로고침" onclick="event.stopPropagation();hardReload()">⟳</button>
         <button class="iconbtn" id="panelToggle" aria-label="toggle panel">▾</button>
@@ -138,7 +138,7 @@ let actions={}, clipBases={}, active=null, activeName=null;
 const FADE=0.3;
 const loader=new THREE.GLTFLoader();
 const $=id=>document.getElementById(id);
-const APP_VERSION="v8";
+const APP_VERSION="v9";
 
 // Cache-bust reload: GitHub Pages / mobile browsers cache aggressively, so a new
 // query string forces a fresh fetch of index.html (and the GLBs).
@@ -488,7 +488,7 @@ function retargetToCharacter(targetSM, srcSM, srcScene, clip){
     // Restore the authored pose/scale BEFORE grounding — pose() left the skeleton in the
     // degenerate bind (collapsed scales), so foot positions would be meaningless otherwise.
     restore(); character.updateMatrixWorld(true);
-    groundClip(out);   // lift hips so the lowest foot rests on the floor each frame
+    groundClip(out);   // shift hips by a single constant so the feet rest on the floor
     return {clip:out, matched, total};
   }catch(e){
     console.error(e); return {error:'retarget error: '+(e.message||'unknown')};
@@ -497,11 +497,14 @@ function retargetToCharacter(targetSM, srcSM, srcScene, clip){
   }
 }
 
-// Foot-ground a retargeted clip: sample it on the character and raise the hips so the
-// lowest foot sits on y=0 at every keyframe. This corrects residual vertical offset from
-// rig-proportion / bind-pose differences, and because the lift is pose-driven it keeps the
-// natural vertical bob (hips ride high when the support leg is straight, low when bent).
-// Only x/z stays from the root track; the hips Y is fully derived from foot contact.
+// Foot-ground a retargeted clip with a SINGLE constant hip offset. We intentionally do NOT
+// adjust the hips per-frame: the source's own vertical root motion (its "bob") is part of
+// the DeepMotion keys and must be reproduced faithfully — per-frame regrounding fights the
+// (already noisy) captured root and makes the result jitter / look like the height changes
+// every frame. So we only measure how far the planted foot sits below the floor across the
+// clip and shift the whole hips Y track up by that constant. The ground reference is a low
+// percentile of per-frame lowest-foot height (robust: a few extreme crouch/airborne frames
+// don't drag the whole clip up), so the typical stance foot lands on y=0.
 function groundClip(clip){
   const skel=findSkinned(character) && findSkinned(character).skeleton; if(!skel) return;
   const hipsName=clip.tracks.map(t=>t.name.split('.')[0]).find(n=>canonBone(n)==='hips');
@@ -513,14 +516,18 @@ function groundClip(clip){
   const sc=new THREE.Vector3(); parent.matrixWorld.decompose(new THREE.Vector3(),new THREE.Quaternion(),sc);
   const scaleY=sc.y||1;                          // armature scale → world per local unit
   const tmp=new THREE.AnimationMixer(character); tmp.clipAction(clip).play();
-  const v=new THREE.Vector3(), lifts=[];
-  for(let k=0;k<hipsTrack.times.length;k++){     // measure first (don't mutate mid-sample)
+  const v=new THREE.Vector3(), lows=[];
+  for(let k=0;k<hipsTrack.times.length;k++){
     tmp.setTime(hipsTrack.times[k]); character.updateMatrixWorld(true);
     let minY=Infinity; feet.forEach(b=>{ b.getWorldPosition(v); if(v.y<minY) minY=v.y; });
-    lifts.push(minY===Infinity ? 0 : -minY/scaleY);
+    if(minY!==Infinity) lows.push(minY);
   }
-  for(let k=0;k<lifts.length;k++) hipsTrack.values[k*3+1]+=lifts[k];
   tmp.stopAllAction(); tmp.uncacheClip(clip);
+  if(!lows.length) return;
+  lows.sort((a,b)=>a-b);
+  const ground=lows[Math.floor(lows.length*0.20)];   // 20th-percentile foot height = floor
+  const lift=-ground/scaleY;
+  for(let i=1;i<hipsTrack.values.length;i+=3) hipsTrack.values[i]+=lift;
 }
 
 // Pin x/z of any position track to its first frame so the character animates
