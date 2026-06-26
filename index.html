@@ -83,7 +83,7 @@
 
   <div class="panel" id="panel">
     <div class="panel-head" id="panelHead">
-      <h1>Meshy character viewer <span class="ver">v7</span></h1>
+      <h1>Meshy character viewer <span class="ver">v8</span></h1>
       <span class="head-actions">
         <button class="iconbtn" id="reloadBtn" title="강력 새로고침" onclick="event.stopPropagation();hardReload()">⟳</button>
         <button class="iconbtn" id="panelToggle" aria-label="toggle panel">▾</button>
@@ -138,7 +138,7 @@ let actions={}, clipBases={}, active=null, activeName=null;
 const FADE=0.3;
 const loader=new THREE.GLTFLoader();
 const $=id=>document.getElementById(id);
-const APP_VERSION="v7";
+const APP_VERSION="v8";
 
 // Cache-bust reload: GitHub Pages / mobile browsers cache aggressively, so a new
 // query string forces a fresh fetch of index.html (and the GLBs).
@@ -348,15 +348,21 @@ function canonBone(raw){
   else if(/^r[_:.\- ]/.test(low)||/[_:.\- ]r[_:.\- ]/.test(low)) side='r';
   let core=low.replace(/mixamorig:?/,'').replace(/left|right/,'')
     .replace(/_jnt$|jnt$/,'').replace(/[_:.\-| ]/g,'');
-  if(side==='l'&&core.startsWith('l')) core=core.slice(1);
-  if(side==='r'&&core.startsWith('r')) core=core.slice(1);
-  core=core.replace(/^pelvis$|^root$|^hip$/,'hips')
+  const known=['hips','spine','spine1','spine2','spine3','neck','head','shoulder','arm','forearm','hand','upleg','leg','foot','toe'];
+  const norm=c=>c.replace(/^pelvis$|^root$|^hip$/,'hips')
     .replace(/^spine01$/,'spine1').replace(/^spine02$/,'spine2').replace(/^spine03$/,'spine3')
     .replace(/^upperarm$/,'arm').replace(/^lowerarm$/,'forearm').replace(/^clavicle$/,'shoulder')
     .replace(/^upperleg$|^thigh$/,'upleg').replace(/^lowerleg$|^calf$|^shin$/,'leg')
     .replace(/^toebase$/,'toe').replace(/^ankle$/,'foot');
-  const known=['hips','spine','spine1','spine2','spine3','neck','head','shoulder','arm','forearm','hand','upleg','leg','foot','toe'];
-  return known.includes(core) ? side+core : null;
+  // Try the core as-is first, then with a stray leading side letter removed. The latter
+  // handles names like DeepMotion's 'l_leg' (core 'lleg' → 'leg'); checking as-is FIRST is
+  // essential so legitimate cores that start with the side letter — e.g. 'LeftLeg' → 'leg'
+  // — aren't mangled into 'eg'. (Stripping unconditionally is the old bug that left the
+  // left shin unmatched, hence a stiff left knee.)
+  const cands=[core];
+  if((side==='l'&&core.startsWith('l'))||(side==='r'&&core.startsWith('r'))) cands.push(core.slice(1));
+  for(const c of cands){ const n=norm(c); if(known.includes(n)) return side+n; }
+  return null;
 }
 
 // Build { targetBoneName: sourceBoneName } map by canonical match.
