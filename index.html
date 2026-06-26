@@ -83,7 +83,7 @@
 
   <div class="panel" id="panel">
     <div class="panel-head" id="panelHead">
-      <h1>Meshy character viewer <span class="ver">v10</span></h1>
+      <h1>Meshy character viewer <span class="ver">v11</span></h1>
       <span class="head-actions">
         <button class="iconbtn" id="reloadBtn" title="강력 새로고침" onclick="event.stopPropagation();hardReload()">⟳</button>
         <button class="iconbtn" id="panelToggle" aria-label="toggle panel">▾</button>
@@ -138,7 +138,7 @@ let actions={}, clipBases={}, active=null, activeName=null;
 const FADE=0.3;
 const loader=new THREE.GLTFLoader();
 const $=id=>document.getElementById(id);
-const APP_VERSION="v10";
+const APP_VERSION="v11";
 
 // Cache-bust reload: GitHub Pages / mobile browsers cache aggressively, so a new
 // query string forces a fresh fetch of index.html (and the GLBs).
@@ -298,7 +298,9 @@ function buildPlayClip(name){
 
 function cloneClip(clip){
   const tracks=clip.tracks.map(t=>t.clone());
-  return new THREE.AnimationClip(clip.name, clip.duration, tracks);
+  const c=new THREE.AnimationClip(clip.name, clip.duration, tracks);
+  c.retargeted=clip.retargeted; c.footContacts=clip.footContacts;   // carry our metadata
+  return c;
 }
 
 // Re-derive every action from its base for the current drift state, preserving
@@ -498,6 +500,7 @@ function retargetToCharacter(targetSM, srcSM, srcScene, clip){
     // degenerate bind (collapsed scales), so foot positions would be meaningless otherwise.
     restore(); character.updateMatrixWorld(true);
     groundClip(out);   // shift hips by a single constant so the feet rest on the floor
+    out.footContacts=detectSourceContacts(srcSM.skeleton, srcScene, clip);  // when each foot is planted
     return {clip:out, matched, total};
   }catch(e){
     console.error(e); return {error:'retarget error: '+(e.message||'unknown')};
@@ -569,7 +572,9 @@ function twoBoneIK(upper, lower, end, targetW){
   let tip=end.getWorldPosition(new THREE.Vector3());
   const l1=root.distanceTo(mid), l2=mid.distanceTo(tip);
   const tgt=targetW.clone(); const dir=tgt.clone().sub(root); let d=dir.length();
-  const dc=THREE.MathUtils.clamp(d, Math.abs(l1-l2)+1e-4, l1+l2-1e-4);
+  // never let the leg reach full extension — keeps a slight knee bend so the IK can't pass
+  // through the straight-leg singularity and pop the knee into reverse.
+  const dc=THREE.MathUtils.clamp(d, Math.abs(l1-l2)+1e-4, (l1+l2)*0.985);
   if(d>1e-6){ tgt.copy(root).add(dir.multiplyScalar(dc/d)); d=dc; }
   aimBone(upper, end, tgt);
   root=upper.getWorldPosition(new THREE.Vector3()); mid=lower.getWorldPosition(new THREE.Vector3()); tip=end.getWorldPosition(new THREE.Vector3());
@@ -595,6 +600,39 @@ function writeQuatTrack(clip, boneName, times, quats){
   const tr=new THREE.QuaternionKeyframeTrack(name, Array.from(times), vals);
   if(idx>=0) clip.tracks[idx]=tr; else clip.tracks.push(tr);
 }
+// Detect each foot's ground-contact frames from the SOURCE animation (clean, well-grounded
+// capture) rather than the noisier retargeted target. Returns { lfoot:bool[], rfoot:bool[] }
+// aligned to the source track keyframes — the play-time foot-lock uses this to know exactly
+// when to pin vs let the foot step, which dodges the freeze-the-step / slide tradeoff.
+function detectSourceContacts(srcSkel, srcScene, clip){
+ try{
+  const find=k=>srcSkel.bones.find(b=>canonBone(b.name)===k);
+  const feet=[{c:'lfoot',foot:find('lfoot'),toe:find('ltoe'),up:find('lupleg'),kn:find('lleg')},
+              {c:'rfoot',foot:find('rfoot'),toe:find('rtoe')}].filter(x=>x.foot);
+  if(!feet.length) return null;
+  const ref=clip.tracks.find(t=>/quaternion$/.test(t.name)); if(!ref) return null;
+  const times=ref.times, nf=times.length;
+  const mx=new THREE.AnimationMixer(srcScene); mx.clipAction(clip).play();
+  const pos=feet.map(()=>[]), hgt=feet.map(()=>[]);
+  for(let f=0;f<nf;f++){ mx.setTime(times[f]); srcScene.updateMatrixWorld(true);
+    feet.forEach((ft,i)=>{ const a=ft.foot.getWorldPosition(new THREE.Vector3()); let h=a.y;
+      if(ft.toe) h=Math.min(h, ft.toe.getWorldPosition(new THREE.Vector3()).y);
+      pos[i].push([a.x,a.y,a.z]); hgt[i].push(h); }); }
+  let legLen=0.8; const f0=feet[0];
+  if(f0.up&&f0.kn){ srcScene.updateMatrixWorld(true);
+    legLen=f0.up.getWorldPosition(new THREE.Vector3()).distanceTo(f0.kn.getWorldPosition(new THREE.Vector3()))
+          +f0.kn.getWorldPosition(new THREE.Vector3()).distanceTo(f0.foot.getWorldPosition(new THREE.Vector3())); }
+  mx.stopAllAction(); mx.uncacheClip(clip);
+  const allH=[]; hgt.forEach(s=>s.forEach(h=>allH.push(h))); allH.sort((a,b)=>a-b); const grd=allH[Math.floor(allH.length*0.2)];
+  const dt=(times[nf-1]-times[0])/(nf-1)||1, res={};
+  feet.forEach((ft,i)=>{ const c=new Array(nf).fill(false);
+    for(let f=1;f<nf-1;f++){ const a=pos[i][f-1],b=pos[i][f+1]; const sp=Math.hypot(a[0]-b[0],a[2]-b[2])/(2*dt);
+      c[f]= hgt[i][f]<grd+legLen*0.12 && sp<legLen*0.7; }
+    smoothBool(c, Math.max(1,Math.round(nf*0.012)), Math.max(3,Math.round(nf*0.015)));
+    res[ft.c]=c; });
+  return res;
+ }catch(e){ console.error('detectSourceContacts failed',e); return null; }
+}
 function footLockClip(clip){
  try{
   const skel=findSkinned(character) && findSkinned(character).skeleton; if(!skel) return;
@@ -616,17 +654,27 @@ function footLockClip(clip){
   const legLenW=u0.distanceTo(m0)+m0.distanceTo(e0);
   const lowAll=[]; for(let f=0;f<nf;f++) lowAll.push(Math.min(...legs.map((_,li)=>data[li].h[f])));
   const groundY=[...lowAll].sort((a,b)=>a-b)[Math.floor(nf*0.2)];
-  // Contact thresholds (tuned on the DeepMotion dance clip): generous height/speed gates so
-  // plants are caught, short gaps merged into stable phases, and a short ramp so even brief
-  // contacts reach a full lock. These cut planted-foot skate ~94% while keeping the per-frame
-  // smoothness at or below the source's own.
-  const hBand=groundY+legLenW*0.20, sThresh=legLenW*2.6;
-  legs.forEach((L,li)=>{ const D=data[li]; D.contact=new Array(nf).fill(false);
+  // Contact thresholds — deliberately conservative. Only a foot clearly near the floor AND
+  // nearly stationary counts as a plant, and swing gaps are NOT merged. This cleans up genuine
+  // foot slide while leaving the feet free to step. (Aggressive detection / gap-merging freezes
+  // feet through their steps and, as the body moves over a stuck foot, inverts the knee — the
+  // failure mode this replaces. For dynamic clips with few clean plants, foot-lock simply does
+  // little rather than damage the motion.)
+  // bandMul/speedMul/gap/run only matter for the fallback (target-based) detection; the short
+  // ramp is what lets the source-driven locks pin firmly without popping (release lands on a
+  // genuine liftoff, so no catch-up). Tunable via window.FL_CFG for experiments.
+  const FL=(typeof window!=='undefined'&&window.FL_CFG)||{};
+  const bandMul=FL.bandMul??0.08, speedMul=FL.speedMul??1.0, rampFrac=FL.rampFrac??0.006, gapFrac=FL.gapFrac??0.012, runFrac=FL.runFrac??0.02;
+  const hBand=groundY+legLenW*bandMul, sThresh=legLenW*speedMul;
+  const srcC=clip.footContacts;   // source-derived plant timing (preferred), else detect from target
+  legs.forEach((L,li)=>{ const D=data[li]; const canon=canonBone(L.foot.name);
+    if(srcC && srcC[canon] && srcC[canon].length===nf){ D.contact=srcC[canon].slice(); return; }
+    D.contact=new Array(nf).fill(false);
     for(let f=0;f<nf;f++){ let spd=0; if(f>0&&f<nf-1){ const a=D.ankle[f-1],b=D.ankle[f+1], dt=(times[f+1]-times[f-1])||1; spd=Math.hypot(a[0]-b[0],a[2]-b[2])/dt; }
       D.contact[f]= D.h[f]<hBand && spd<sThresh; }
-    smoothBool(D.contact, Math.max(2,Math.round(nf*0.10)), Math.max(2,Math.round(nf*0.012))); });
+    smoothBool(D.contact, Math.max(1,Math.round(nf*gapFrac)), Math.max(2,Math.round(nf*runFrac))); });
   // per contact phase: lock to the median ankle position; ease weight in/out at the ends
-  const ramp=Math.max(2,Math.round(nf*0.012));
+  const ramp=Math.max(2,Math.round(nf*rampFrac));
   legs.forEach((L,li)=>{ const D=data[li]; D.w=new Array(nf).fill(0); D.tgt=new Array(nf);
     let f=0; while(f<nf){ if(!D.contact[f]){f++;continue;} let g=f; while(g<nf&&D.contact[g])g++;
       const xs=[],zs=[]; let lf=f,lh=Infinity;
