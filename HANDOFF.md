@@ -25,6 +25,15 @@
    높이 비율(`ptRest.y/psRest.y`)로 스케일 (월드 높이는 armature 스케일이 섞여 틀림 — Meshy
    Armature는 ×0.01). 부모 world 회전으로 이동 방향 재표현. drift off 시 좌우 이동 살아남.
 
+## v15 — 조인트 회전 기즈모(매니퓰레이터)
+- `TransformControls`(three examples) 로드 → 선택 본에 **회전 기즈모** 표시. `initGizmo()`에서
+  생성(rotate 모드, local 공간, size 0.8), `updateGizmo()`가 선택 본에 attach/detach.
+  "조인트 기즈모 표시" 체크박스(`gizmoChk`)로 on/off.
+- 드래그 처리: `dragging-changed`→OrbitControls 비활성+일시정지, `objectChange`→
+  `editOverride={bone, q:bone.quaternion}` 갱신 + 오일러 필드 동기화. 기존 editOverride/animate
+  덮어쓰기 메커니즘으로 프리뷰 유지, "키 저장"은 editOverride.q(정확값) 사용.
+- 주의: `gizmo`도 상단 전역. CDN에서 TransformControls.js 추가 로드(없으면 initGizmo no-op).
+
 ## v14 — 재생 컨트롤 + 조인트 편집 + 그래프
 - **재생 컨트롤**: 일시정지/재생(`togglePlay`, action.paused 사용), 한 프레임씩(`stepFrame±1`),
   스크럽 슬라이더, frame 입력. 키보드: space=재생/정지, `,`/`.`=프레임. 시킹은 `seekFrame(f)`

@@ -89,7 +89,7 @@
 
   <div class="panel" id="panel">
     <div class="panel-head" id="panelHead">
-      <h1>Meshy character viewer <span class="ver">v14</span></h1>
+      <h1>Meshy character viewer <span class="ver">v15</span></h1>
       <span class="head-actions">
         <button class="iconbtn" id="reloadBtn" title="강력 새로고침" onclick="event.stopPropagation();hardReload()">⟳</button>
         <button class="iconbtn" id="panelToggle" aria-label="toggle panel">▾</button>
@@ -142,6 +142,10 @@
 
         <label style="margin-top:12px">조인트 편집 (일시정지 상태에서)</label>
         <select id="boneSel"></select>
+        <label style="display:flex;align-items:center;gap:8px;margin-top:6px;font-size:12px;color:var(--ink);cursor:pointer">
+          <input type="checkbox" id="gizmoChk" checked style="width:16px;height:16px;accent-color:var(--accent)">
+          조인트 기즈모 표시 (드래그로 회전)
+        </label>
         <div class="row" style="gap:4px;margin-top:6px">
           <input type="number" id="rx" step="1" placeholder="X°"><input type="number" id="ry" step="1" placeholder="Y°"><input type="number" id="rz" step="1" placeholder="Z°">
         </div>
@@ -169,14 +173,15 @@
 <script src="https://cdn.jsdelivr.net/npm/three@0.128.0/examples/js/controls/OrbitControls.js"></script>
 <script src="https://cdn.jsdelivr.net/npm/three@0.128.0/examples/js/loaders/GLTFLoader.js"></script>
 <script src="https://cdn.jsdelivr.net/npm/three@0.128.0/examples/js/utils/SkeletonUtils.js"></script>
+<script src="https://cdn.jsdelivr.net/npm/three@0.128.0/examples/js/controls/TransformControls.js"></script>
 <script>
 let scene,camera,renderer,controls,clock,mixer,character;
 let actions={}, clipBases={}, active=null, activeName=null;
-let editSkel=null, editOverride=null, graphCache=null, graphBone=null, lastGraphFrame=-1;
+let editSkel=null, editOverride=null, graphCache=null, graphBone=null, lastGraphFrame=-1, gizmo=null;
 const FADE=0.3;
 const loader=new THREE.GLTFLoader();
 const $=id=>document.getElementById(id);
-const APP_VERSION="v14";
+const APP_VERSION="v15";
 
 // Cache-bust reload: GitHub Pages / mobile browsers cache aggressively, so a new
 // query string forces a fresh fetch of index.html (and the GLBs).
@@ -219,6 +224,7 @@ function init(){
   controls.target.set(0,1,0); controls.enableDamping=true; controls.dampingFactor=.08;
   controls.minDistance=.5; controls.maxDistance=40; controls.update();
 
+  initGizmo();
   clock=new THREE.Clock();
   addEventListener('resize',onResize);
   wireUI();
@@ -242,7 +248,7 @@ function setStatus(msg,kind){const s=$('status');s.textContent=msg;s.className='
 function resetViewer(){
   if(character) scene.remove(character);
   character=null; mixer=null; actions={}; clipBases={}; playCache={}; active=null; activeName=null;
-  editSkel=null; editOverride=null; graphCache=null; if($('boneSel'))$('boneSel').innerHTML=''; if($('editgrp'))$('editgrp').style.display='none';
+  editSkel=null; editOverride=null; graphCache=null; if(gizmo)gizmo.detach(); if($('boneSel'))$('boneSel').innerHTML=''; if($('editgrp'))$('editgrp').style.display='none';
   renderClips();
   setStatus('Cleared. Drop or pick a .glb to load.', '');
 }
@@ -264,7 +270,7 @@ async function setCharacter(src,label){
     const g=await loadGLB(src);
     if(character) scene.remove(character);
     actions={}; clipBases={}; playCache={}; active=null; activeName=null;
-    editSkel=null; editOverride=null; graphCache=null; if($('boneSel'))$('boneSel').innerHTML=''; if($('editgrp'))$('editgrp').style.display='none';
+    editSkel=null; editOverride=null; graphCache=null; if(gizmo)gizmo.detach(); if($('boneSel'))$('boneSel').innerHTML=''; if($('editgrp'))$('editgrp').style.display='none';
     renderClips();
     character=g.scene;
     scene.add(character);
@@ -897,7 +903,8 @@ function wireUI(){
   $('stepF').onclick=()=>stepFrame(1);
   $('scrub').oninput=()=>{ if(active){active.paused=true;updatePlayBtn();} seekFrame(+$('scrub').value); };
   $('frameInput').onchange=()=>{ if(active){active.paused=true;updatePlayBtn();} seekFrame(+$('frameInput').value); };
-  $('boneSel').onchange=()=>{ graphCache=null; clearOverride(); refreshEuler(); drawGraph(); };
+  $('boneSel').onchange=()=>{ graphCache=null; clearOverride(); refreshEuler(); drawGraph(); updateGizmo(); };
+  $('gizmoChk').onchange=()=>updateGizmo();
   ['rx','ry','rz'].forEach(id=>$(id).oninput=onEulerEdit);
   $('saveKey').onclick=saveKey;
   $('revertKey').onclick=revertEdit;
@@ -951,7 +958,23 @@ function selBone(){ return editSkel ? editSkel.bones.find(b=>b.name===$('boneSel
 function ensureSolo(){ if(!active) return; Object.keys(actions).forEach(n=>{ if(actions[n]!==active) actions[n].stop(); }); active.setEffectiveWeight(1).play(); }
 function updatePlayBtn(){ const b=$('playPause'); if(b) b.textContent=(active&&active.paused)?'▶ 재생':'⏸ 일시정지'; }
 function showEditor(){ const sm=findSkinned(character); if(!sm) return; editSkel=sm.skeleton; $('editgrp').style.display='block';
-  const sel=$('boneSel'); if(!sel.options.length) editSkel.bones.forEach(b=>{ const o=document.createElement('option'); o.value=b.name; o.textContent=b.name; sel.appendChild(o); }); }
+  const sel=$('boneSel'); if(!sel.options.length) editSkel.bones.forEach(b=>{ const o=document.createElement('option'); o.value=b.name; o.textContent=b.name; sel.appendChild(o); });
+  updateGizmo(); }
+// 3D rotation manipulator on the selected joint (drag to rotate → live preview + euler sync).
+function initGizmo(){
+  if(!THREE.TransformControls){ return; }
+  gizmo=new THREE.TransformControls(camera, renderer.domElement);
+  gizmo.setMode('rotate'); gizmo.setSpace('local'); gizmo.setSize(0.8);
+  gizmo.addEventListener('dragging-changed', e=>{ controls.enabled=!e.value; if(e.value && active){ active.paused=true; updatePlayBtn(); } });
+  gizmo.addEventListener('objectChange', ()=>{ const b=gizmo.object; if(b){ editOverride={bone:b, q:b.quaternion.clone()}; refreshEuler(); } });
+  scene.add(gizmo);
+}
+function updateGizmo(){
+  if(!gizmo) return;
+  const on = $('gizmoChk') && $('gizmoChk').checked && $('editgrp').style.display!=='none';
+  const b=on?selBone():null;
+  if(b){ if(gizmo.object!==b) gizmo.attach(b); } else gizmo.detach();
+}
 function seekFrame(f){ const c=actClip(); if(!c||!active) return; f=Math.max(0,Math.min(totalFrames(),Math.round(f)));
   ensureSolo(); active.time=f/clipFps(c); mixer.update(0); clearOverride(); refreshTransport(true); }
 function togglePlay(){ if(!active) return; active.paused=!active.paused; if(!active.paused){ ensureSolo(); clearOverride(); } updatePlayBtn(); }
@@ -970,7 +993,7 @@ function onEulerEdit(){ const b=selBone(); if(!b||!active) return; if(!active.pa
 function nearestIndex(times,t){ let lo=0,hi=times.length-1; if(t<=times[0])return 0; if(t>=times[hi])return hi;
   while(hi-lo>1){ const m=(lo+hi)>>1; if(times[m]<t) lo=m; else hi=m; } return (t-times[lo])<(times[hi]-t)?lo:hi; }
 function saveKey(){ const name=activeName, base=clipBases[name], b=selBone(); if(!base||!b||!active){ setStatus('저장 실패: 클립/본 없음','err'); return; }
-  const q=eulerToQuat();
+  const q=(editOverride && editOverride.bone===b) ? editOverride.q.clone() : eulerToQuat();   // exact gizmo value
   let tr=base.tracks.find(t=>t.name===b.name+'.quaternion');
   if(!tr){ const ref=base.tracks.find(t=>/\.quaternion$/.test(t.name)); const times=ref?Array.from(ref.times):[0];
     const vals=new Float32Array(times.length*4); for(let i=0;i<times.length;i++){ vals[i*4]=q.x;vals[i*4+1]=q.y;vals[i*4+2]=q.z;vals[i*4+3]=q.w; }
