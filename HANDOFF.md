@@ -25,6 +25,20 @@
    높이 비율(`ptRest.y/psRest.y`)로 스케일 (월드 높이는 armature 스케일이 섞여 틀림 — Meshy
    Armature는 ×0.01). 부모 world 회전으로 이동 방향 재표현. drift off 시 좌우 이동 살아남.
 
+## v14 — 재생 컨트롤 + 조인트 편집 + 그래프
+- **재생 컨트롤**: 일시정지/재생(`togglePlay`, action.paused 사용), 한 프레임씩(`stepFrame±1`),
+  스크럽 슬라이더, frame 입력. 키보드: space=재생/정지, `,`/`.`=프레임. 시킹은 `seekFrame(f)`
+  → ensureSolo(다른 액션 stop) + active.time=f/fps + mixer.update(0). fps는 클립 최대 트랙 키수로 추정.
+- **조인트 편집**: 본 드롭다운(`boneSel`, 캐릭터 스켈레톤), 오일러 XYZ(deg) 입력. 편집 시
+  `editOverride={bone,q}`로 매 프레임 animate에서 로컬 회전 덮어써 프리뷰(일시정지 자동). 
+  "이 프레임에 키 저장"=`saveKey`: **base 클립**의 해당 본 quaternion 트랙에서 현재 시간 최근접
+  키 index에 기록(트랙 없으면 생성) → playCache 비우고 rebuildActions → 같은 프레임 재시킹.
+  base에 저장하므로 drift/footlock 토글에도 유지. 되돌리기=프리뷰 폐기 후 재시킹.
+- **그래프**(`#graph` canvas): 선택 본 로컬 회전 오일러 X/Y/Z(빨강/초록/파랑) 전체 구간 + 현재
+  프레임 세로선(주황). graphCache는 본/저장 시 갱신.
+- 주의: editor 상태 변수(editSkel/editOverride/graphCache 등)는 **반드시 상단 전역**에 선언할 것
+  — animate()가 init()에서 동기 호출되며 editOverride를 읽으므로 TDZ 에러 방지.
+
 ## v13 — 발 고정 기본 OFF(충실 모드) + 타임코드 표시
 사용자 피드백: IK 처리(발 고정/무릎 pole)가 전체 자연스러움을 떨어뜨림 → 발이 미끄러져도
 DeepMotion 원본 그대로가 더 나음.
