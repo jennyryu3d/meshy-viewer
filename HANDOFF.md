@@ -25,6 +25,16 @@
    높이 비율(`ptRest.y/psRest.y`)로 스케일 (월드 높이는 armature 스케일이 섞여 틀림 — Meshy
    Armature는 ×0.01). 부모 world 회전으로 이동 방향 재표현. drift off 시 좌우 이동 살아남.
 
+## v18 — 순환(루프) 블렌드 + Z 단축키
+- **Z 단축키**: 입력칸 포커스 아님일 때 `z`/`Z`(또는 Ctrl+Z) = undo. editOverride 있으면 미리보기
+  취소, 없으면 마지막 저장 취소.
+- **순환 블렌드(`applyBlend`)**: 기존엔 ib-N..ib+N 선형 → 시작/끝 근처 편집 시 루프 이음새가
+  안 맞아 튐. 이제 **원형 거리**(wrap)로 falloff 적용. 첫 키==마지막 키(loop seam)면 distinct
+  주기 P=n-1로 처리하고 끝에서 frame0 값을 마지막 키에 복사해 **이음새 동일 유지**.
+  검증(running n=20, loopDup): frame6 편집 시 frame5/7 대칭 블렌드, 끝 프레임도 wrap 블렌드,
+  frame0==frame(n-1) dot=1.0 유지.
+- undo 스냅샷은 순환 wrap을 위해 **트랙 전체** 저장/복원(`u.prev`=values.slice()).
+
 ## v17 — 저장 시 미세 이동 수정 + 블렌드(오프셋) 저장
 - **저장 순간 미세 이동 수정**: 프레임을 `time*fps`가 아니라 **클립의 실제 키프레임 시간**
   (가장 키 많은 트랙의 times)에 매핑. `clipTimes()`/seekFrame이 times[f]로 정확히 스냅 →

@@ -89,7 +89,7 @@
 
   <div class="panel" id="panel">
     <div class="panel-head" id="panelHead">
-      <h1>Meshy character viewer <span class="ver">v17</span></h1>
+      <h1>Meshy character viewer <span class="ver">v18</span></h1>
       <span class="head-actions">
         <button class="iconbtn" id="reloadBtn" title="강력 새로고침" onclick="event.stopPropagation();hardReload()">⟳</button>
         <button class="iconbtn" id="panelToggle" aria-label="toggle panel">▾</button>
@@ -156,7 +156,7 @@
         <button id="saveKey" class="primary" style="width:100%;margin-top:6px">이 프레임에 키 저장</button>
         <div class="row" style="gap:6px;margin-top:6px">
           <button id="revertKey" style="flex:1" title="저장 전 미리보기 취소">미리보기 취소</button>
-          <button id="undoKey" style="flex:1" title="마지막 저장 취소 (Ctrl+Z)">↶ 실행취소</button>
+          <button id="undoKey" style="flex:1" title="마지막 저장 취소 (Z)">↶ 실행취소 (Z)</button>
         </div>
         <canvas id="graph" width="552" height="180" style="width:100%;height:90px;margin-top:8px;background:var(--stage);border:1px solid var(--line);border-radius:8px;display:block"></canvas>
         <div class="legend">그래프: 선택 본 로컬 회전 오일러 X/<span style="color:#e0594f">R</span>·Y/<span style="color:#3fb568">G</span>·Z/<span style="color:#5b9bff">B</span>, 세로선=현재 프레임</div>
@@ -186,7 +186,7 @@ let editSkel=null, editOverride=null, graphCache=null, graphBone=null, lastGraph
 const FADE=0.3;
 const loader=new THREE.GLTFLoader();
 const $=id=>document.getElementById(id);
-const APP_VERSION="v17";
+const APP_VERSION="v18";
 
 // Cache-bust reload: GitHub Pages / mobile browsers cache aggressively, so a new
 // query string forces a fresh fetch of index.html (and the GLBs).
@@ -918,7 +918,7 @@ function wireUI(){
   if(innerWidth<=640) $('panel').classList.add('collapsed');  // start collapsed on phones
   addEventListener('keydown',e=>{
     const typing=/^(INPUT|SELECT|TEXTAREA)$/.test((e.target&&e.target.tagName)||'');
-    if((e.ctrlKey||e.metaKey)&&(e.key==='z'||e.key==='Z')&&!typing){ e.preventDefault(); if(editOverride) revertEdit(); else undoKey(); }
+    if((e.key==='z'||e.key==='Z')&&!typing){ e.preventDefault(); if(editOverride) revertEdit(); else undoKey(); }   // Z (or Ctrl+Z) = undo
     else if(e.key===' '&&!typing){ e.preventDefault(); togglePlay(); }
     else if(e.key===','&&!typing){ stepFrame(-1); }
     else if(e.key==='.'&&!typing){ stepFrame(1); }
@@ -1005,18 +1005,27 @@ function findOrMakeQTrack(clip, boneName, q){
   const vals=new Float32Array(times.length*4); for(let i=0;i<times.length;i++){ vals[i*4]=q.x;vals[i*4+1]=q.y;vals[i*4+2]=q.z;vals[i*4+3]=q.w; }
   tr=new THREE.QuaternionKeyframeTrack(boneName+'.quaternion',times,vals); clip.tracks.push(tr); return {tr,created:true};
 }
-// Apply rotation delta Dq (q_new = Dq · q_orig at the edited key) to keys idx-N..idx+N with a
-// smoothstep falloff (1 at idx → 0 at ±N), so the edit blends into neighbours instead of popping.
+// Apply rotation delta Dq (q_new = Dq · q_orig at the edited key) to keys within N of idx, with a
+// smoothstep falloff (1 at idx → 0 at ±N). The window is CIRCULAR — distance wraps around the clip
+// — so an edit near the start also blends the end frames, keeping a looping animation seamless.
+// If the first and last keys are identical (loop seam), they're treated as one and re-synced.
 const _qi=new THREE.Quaternion(), _qo=new THREE.Quaternion();
 function applyBlend(tr, idx, N, Dq){
-  const n=tr.times.length, lo=Math.max(0,idx-N), hi=Math.min(n-1,idx+N);
-  for(let j=lo;j<=hi;j++){
-    let w = N>0 ? 1-Math.abs(j-idx)/N : (j===idx?1:0); w=w*w*(3-2*w);
+  const n=tr.times.length; if(n<1) return;
+  const v=tr.values;
+  const loopDup = n>1 && Math.abs(v[0]*v[(n-1)*4]+v[1]*v[(n-1)*4+1]+v[2]*v[(n-1)*4+2]+v[3]*v[(n-1)*4+3])>0.99999;
+  const P = loopDup ? n-1 : n;          // circular period over distinct keys
+  const c = ((idx%P)+P)%P;
+  for(let j=0;j<P;j++){
+    let d=Math.abs(j-c); d=Math.min(d, P-d);   // circular distance
+    if(d>N) continue;
+    let w = N>0 ? 1-d/N : (d===0?1:0); w=w*w*(3-2*w);
     if(w<=0) continue;
-    _qo.set(tr.values[j*4],tr.values[j*4+1],tr.values[j*4+2],tr.values[j*4+3]);
+    _qo.set(v[j*4],v[j*4+1],v[j*4+2],v[j*4+3]);
     _qi.set(0,0,0,1).slerp(Dq,w).multiply(_qo);   // (I→Dq by w) · origKey
-    tr.values[j*4]=_qi.x; tr.values[j*4+1]=_qi.y; tr.values[j*4+2]=_qi.z; tr.values[j*4+3]=_qi.w;
+    v[j*4]=_qi.x; v[j*4+1]=_qi.y; v[j*4+2]=_qi.z; v[j*4+3]=_qi.w;
   }
+  if(loopDup){ const a=(n-1)*4; v[a]=v[0]; v[a+1]=v[1]; v[a+2]=v[2]; v[a+3]=v[3]; }  // keep seam identical
 }
 // Save the joint's current rotation into the keyframe (what's displayed), blended over ±N
 // frames. Edits BOTH the base clip (persists across toggles) and the live played clip IN PLACE,
@@ -1028,8 +1037,7 @@ function saveKey(){ const name=activeName, base=clipBases[name], b=selBone(); if
   const wb=findOrMakeQTrack(base,b.name,q); const ib=nearestIndex(wb.tr.times,t);
   const orig=new THREE.Quaternion(wb.tr.values[ib*4],wb.tr.values[ib*4+1],wb.tr.values[ib*4+2],wb.tr.values[ib*4+3]);
   const Dq=q.clone().multiply(orig.invert());      // q = Dq · orig
-  const lo=Math.max(0,ib-N), hi=Math.min(wb.tr.times.length-1,ib+N);
-  undoStack.push({name,boneName:b.name,lo,prev:wb.tr.values.slice(lo*4,(hi+1)*4),created:wb.created});
+  undoStack.push({name,boneName:b.name,prev:wb.tr.values.slice(),created:wb.created});  // whole-track snapshot (circular blend can wrap)
   if(undoStack.length>80) undoStack.shift();
   applyBlend(wb.tr, ib, N, Dq);
   let needRebuild=wb.created;
@@ -1042,7 +1050,7 @@ function saveKey(){ const name=activeName, base=clipBases[name], b=selBone(); if
 function undoKey(){ if(!undoStack.length){ setStatus('실행취소할 저장 없음',''); return; }
   const u=undoStack.pop(), base=clipBases[u.name]; if(!base){ return; }
   const tr=base.tracks.find(t=>t.name===u.boneName+'.quaternion');
-  if(tr){ if(u.created){ const i=base.tracks.indexOf(tr); if(i>=0) base.tracks.splice(i,1); } else { tr.values.set(u.prev, u.lo*4); } }
+  if(tr){ if(u.created){ const i=base.tracks.indexOf(tr); if(i>=0) base.tracks.splice(i,1); } else { tr.values.set(u.prev); } }
   playCache={}; graphCache=null; clearOverride();
   const f=curFrame(); rebuildActions(); if(active){ active.paused=true; seekFrame(f); } updatePlayBtn();
   setStatus('실행취소: '+u.boneName,'ok'); }
