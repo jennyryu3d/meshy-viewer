@@ -89,7 +89,7 @@
 
   <div class="panel" id="panel">
     <div class="panel-head" id="panelHead">
-      <h1>Meshy character viewer <span class="ver">v16</span></h1>
+      <h1>Meshy character viewer <span class="ver">v17</span></h1>
       <span class="head-actions">
         <button class="iconbtn" id="reloadBtn" title="강력 새로고침" onclick="event.stopPropagation();hardReload()">⟳</button>
         <button class="iconbtn" id="panelToggle" aria-label="toggle panel">▾</button>
@@ -149,6 +149,10 @@
         <div class="row" style="gap:4px;margin-top:6px">
           <input type="number" id="rx" step="1" placeholder="X°"><input type="number" id="ry" step="1" placeholder="Y°"><input type="number" id="rz" step="1" placeholder="Z°">
         </div>
+        <div class="row" style="gap:6px;margin-top:6px;align-items:center">
+          <span style="font-size:11px;color:var(--muted)">블렌드 ±프레임</span>
+          <input type="number" id="blendN" value="10" min="0" step="1" title="수정값을 앞뒤 N프레임에 falloff로 반영(0=해당 키만)">
+        </div>
         <button id="saveKey" class="primary" style="width:100%;margin-top:6px">이 프레임에 키 저장</button>
         <div class="row" style="gap:6px;margin-top:6px">
           <button id="revertKey" style="flex:1" title="저장 전 미리보기 취소">미리보기 취소</button>
@@ -182,7 +186,7 @@ let editSkel=null, editOverride=null, graphCache=null, graphBone=null, lastGraph
 const FADE=0.3;
 const loader=new THREE.GLTFLoader();
 const $=id=>document.getElementById(id);
-const APP_VERSION="v16";
+const APP_VERSION="v17";
 
 // Cache-bust reload: GitHub Pages / mobile browsers cache aggressively, so a new
 // query string forces a fresh fetch of index.html (and the GLBs).
@@ -942,20 +946,19 @@ function onResize(){camera.aspect=innerWidth/innerHeight;camera.updateProjection
 // the clip's densest track). Lets you report exact moments.
 function updateTimecode(){
   const el=$('timecode'); if(!el) return;
-  const clip=active && active.getClip && active.getClip();
+  const clip=actClip();
   if(!clip){ el.style.display='none'; return; }
-  if(!clip.__fps){ let m=0; clip.tracks.forEach(t=>{ if(t.times.length>m) m=t.times.length; }); clip.__fps=clip.duration>0?(m-1)/clip.duration:30; }
-  const t=active.time||0, frame=Math.round(t*clip.__fps), total=Math.round(clip.duration*clip.__fps);
+  const t=active.time||0;
   el.style.display='block';
-  el.innerHTML=`${activeName}　·　t <b>${t.toFixed(2)}</b> / ${clip.duration.toFixed(2)}s　·　f <b>${frame}</b> / ${total}`;
+  el.innerHTML=`${activeName}　·　t <b>${t.toFixed(2)}</b> / ${clip.duration.toFixed(2)}s　·　f <b>${curFrame()}</b> / ${totalFrames()}`;
 }
 // ── Playback transport + joint editor + graph ──────────────────────────────────
-// (state declared with the other globals up top so the synchronous first animate() call,
-//  which reads editOverride, doesn't hit a temporal-dead-zone error.)
+// Frames map to the clip's ACTUAL keyframe times (densest track), not time*fps — so seeking
+// lands exactly on a key and the saved pose == the displayed pose (no jump on save).
 function actClip(){ return active && active.getClip ? active.getClip() : null; }
-function clipFps(c){ c=c||actClip(); if(!c) return 30; if(!c.__fps){ let m=0; c.tracks.forEach(t=>{ if(t.times.length>m) m=t.times.length; }); c.__fps=c.duration>0?(m-1)/c.duration:30; } return c.__fps; }
-function totalFrames(){ const c=actClip(); return c?Math.max(1,Math.round(c.duration*clipFps(c))):1; }
-function curFrame(){ return active?Math.round((active.time||0)*clipFps()):0; }
+function clipTimes(c){ c=c||actClip(); if(!c) return null; if(!c.__times){ let best=null; c.tracks.forEach(t=>{ if(!best||t.times.length>best.length) best=t.times; }); c.__times=best||new Float32Array([0]); } return c.__times; }
+function totalFrames(){ const tm=clipTimes(); return tm?Math.max(1,tm.length-1):1; }
+function curFrame(){ const tm=clipTimes(); return (tm&&active)?nearestIndex(tm,active.time||0):0; }
 function clearOverride(){ editOverride=null; }
 function selBone(){ return editSkel ? editSkel.bones.find(b=>b.name===$('boneSel').value) : null; }
 function ensureSolo(){ if(!active) return; Object.keys(actions).forEach(n=>{ if(actions[n]!==active) actions[n].stop(); }); active.setEffectiveWeight(1).play(); }
@@ -978,8 +981,8 @@ function updateGizmo(){
   const b=on?selBone():null;
   if(b){ if(gizmo.object!==b) gizmo.attach(b); } else gizmo.detach();
 }
-function seekFrame(f){ const c=actClip(); if(!c||!active) return; f=Math.max(0,Math.min(totalFrames(),Math.round(f)));
-  ensureSolo(); active.time=f/clipFps(c); mixer.update(0); clearOverride(); refreshTransport(true); }
+function seekFrame(f){ const c=actClip(); if(!c||!active) return; const tm=clipTimes(c); f=Math.max(0,Math.min(tm.length-1,Math.round(f)));
+  ensureSolo(); active.time=tm[f]; mixer.update(0); clearOverride(); refreshTransport(true); }
 function togglePlay(){ if(!active) return; active.paused=!active.paused; if(!active.paused){ ensureSolo(); clearOverride(); } updatePlayBtn(); }
 function stepFrame(d){ if(!active) return; active.paused=true; updatePlayBtn(); seekFrame(curFrame()+d); }
 function refreshTransport(force){ if(!active) return; const f=curFrame(), tot=totalFrames();
@@ -1002,29 +1005,44 @@ function findOrMakeQTrack(clip, boneName, q){
   const vals=new Float32Array(times.length*4); for(let i=0;i<times.length;i++){ vals[i*4]=q.x;vals[i*4+1]=q.y;vals[i*4+2]=q.z;vals[i*4+3]=q.w; }
   tr=new THREE.QuaternionKeyframeTrack(boneName+'.quaternion',times,vals); clip.tracks.push(tr); return {tr,created:true};
 }
-function setQKey(tr,idx,q){ tr.values[idx*4]=q.x; tr.values[idx*4+1]=q.y; tr.values[idx*4+2]=q.z; tr.values[idx*4+3]=q.w; }
-// Save the joint's current rotation into the keyframe. We edit BOTH the base clip (persists
-// across drift/foot-lock toggles) and the live played clip IN PLACE — the mixer's interpolant
-// reads the same array, so the pose updates immediately with no rebuild (rebuild only if a brand
-// new track had to be created). We save what's actually displayed (the live bone quaternion).
+// Apply rotation delta Dq (q_new = Dq · q_orig at the edited key) to keys idx-N..idx+N with a
+// smoothstep falloff (1 at idx → 0 at ±N), so the edit blends into neighbours instead of popping.
+const _qi=new THREE.Quaternion(), _qo=new THREE.Quaternion();
+function applyBlend(tr, idx, N, Dq){
+  const n=tr.times.length, lo=Math.max(0,idx-N), hi=Math.min(n-1,idx+N);
+  for(let j=lo;j<=hi;j++){
+    let w = N>0 ? 1-Math.abs(j-idx)/N : (j===idx?1:0); w=w*w*(3-2*w);
+    if(w<=0) continue;
+    _qo.set(tr.values[j*4],tr.values[j*4+1],tr.values[j*4+2],tr.values[j*4+3]);
+    _qi.set(0,0,0,1).slerp(Dq,w).multiply(_qo);   // (I→Dq by w) · origKey
+    tr.values[j*4]=_qi.x; tr.values[j*4+1]=_qi.y; tr.values[j*4+2]=_qi.z; tr.values[j*4+3]=_qi.w;
+  }
+}
+// Save the joint's current rotation into the keyframe (what's displayed), blended over ±N
+// frames. Edits BOTH the base clip (persists across toggles) and the live played clip IN PLACE,
+// so the pose updates with no rebuild (rebuild only if a track had to be created). After saving
+// we snap the playhead to the exact key time so the shown pose equals the saved pose (no jump).
 function saveKey(){ const name=activeName, base=clipBases[name], b=selBone(); if(!base||!b||!active){ setStatus('저장 실패: 클립/본 없음','err'); return; }
   const q=(editOverride && editOverride.bone===b) ? editOverride.q.clone() : b.quaternion.clone();
-  const t=active.time, played=active.getClip();
+  const N=Math.max(0,Math.round(+($('blendN').value)||0)), t=active.time, played=active.getClip();
   const wb=findOrMakeQTrack(base,b.name,q); const ib=nearestIndex(wb.tr.times,t);
-  undoStack.push({name,boneName:b.name,idx:ib,prev:[wb.tr.values[ib*4],wb.tr.values[ib*4+1],wb.tr.values[ib*4+2],wb.tr.values[ib*4+3]],created:wb.created});
+  const orig=new THREE.Quaternion(wb.tr.values[ib*4],wb.tr.values[ib*4+1],wb.tr.values[ib*4+2],wb.tr.values[ib*4+3]);
+  const Dq=q.clone().multiply(orig.invert());      // q = Dq · orig
+  const lo=Math.max(0,ib-N), hi=Math.min(wb.tr.times.length-1,ib+N);
+  undoStack.push({name,boneName:b.name,lo,prev:wb.tr.values.slice(lo*4,(hi+1)*4),created:wb.created});
   if(undoStack.length>80) undoStack.shift();
-  setQKey(wb.tr,ib,q);
+  applyBlend(wb.tr, ib, N, Dq);
   let needRebuild=wb.created;
-  if(!needRebuild){ const wp=findOrMakeQTrack(played,b.name,q); if(wp.created) needRebuild=true; else setQKey(wp.tr,nearestIndex(wp.tr.times,t),q); }
+  if(!needRebuild){ const wp=findOrMakeQTrack(played,b.name,q); if(wp.created) needRebuild=true; else applyBlend(wp.tr, nearestIndex(wp.tr.times,t), N, Dq); }
   clearOverride(); graphCache=null;
-  const f=curFrame();
-  if(needRebuild){ playCache={}; rebuildActions(); if(active){ active.paused=true; seekFrame(f); } }
-  else { ensureSolo(); active.paused=true; mixer.update(0); refreshTransport(true); }
-  updatePlayBtn(); setStatus('키 저장: '+b.name+' @ frame '+f,'ok'); }
+  if(needRebuild){ playCache={}; rebuildActions(); if(active) active.paused=true; }
+  else { ensureSolo(); active.paused=true; }
+  seekFrame(curFrame());   // snap to the exact key → shown pose == saved pose
+  updatePlayBtn(); setStatus('키 저장: '+b.name+' @ f'+curFrame()+(N?(' (±'+N+' 블렌드)'):''),'ok'); }
 function undoKey(){ if(!undoStack.length){ setStatus('실행취소할 저장 없음',''); return; }
   const u=undoStack.pop(), base=clipBases[u.name]; if(!base){ return; }
   const tr=base.tracks.find(t=>t.name===u.boneName+'.quaternion');
-  if(tr){ if(u.created){ const i=base.tracks.indexOf(tr); if(i>=0) base.tracks.splice(i,1); } else { tr.values[u.idx*4]=u.prev[0];tr.values[u.idx*4+1]=u.prev[1];tr.values[u.idx*4+2]=u.prev[2];tr.values[u.idx*4+3]=u.prev[3]; } }
+  if(tr){ if(u.created){ const i=base.tracks.indexOf(tr); if(i>=0) base.tracks.splice(i,1); } else { tr.values.set(u.prev, u.lo*4); } }
   playCache={}; graphCache=null; clearOverride();
   const f=curFrame(); rebuildActions(); if(active){ active.paused=true; seekFrame(f); } updatePlayBtn();
   setStatus('실행취소: '+u.boneName,'ok'); }

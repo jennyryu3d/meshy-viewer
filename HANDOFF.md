@@ -25,6 +25,17 @@
    높이 비율(`ptRest.y/psRest.y`)로 스케일 (월드 높이는 armature 스케일이 섞여 틀림 — Meshy
    Armature는 ×0.01). 부모 world 회전으로 이동 방향 재표현. drift off 시 좌우 이동 살아남.
 
+## v17 — 저장 시 미세 이동 수정 + 블렌드(오프셋) 저장
+- **저장 순간 미세 이동 수정**: 프레임을 `time*fps`가 아니라 **클립의 실제 키프레임 시간**
+  (가장 키 많은 트랙의 times)에 매핑. `clipTimes()`/seekFrame이 times[f]로 정확히 스냅 →
+  저장 후 표시 포즈 == 저장값(보간 어긋남 없음). 검증: posed==saved dot 1.0.
+- **블렌드 저장**: "블렌드 ±프레임"(기본 10). 저장 시 수정 키의 회전 델타 `Dq=q_new·q_orig⁻¹`를
+  인접 키 ib-N..ib+N에 **smoothstep falloff**로 전파(`applyBlend`): `key_j = slerp(I,Dq,w)·key_j`.
+  edited 키=풀 적용, ±N/2≈절반, ±N=0, 그 밖=불변 → 튐 없이 앞뒤가 자연스럽게 따라감.
+  base+played 둘 다 in-place. 검증: key100=저장값, key95 부분변경, key90/85 불변, undo 잔차 0.
+- undo는 이제 **범위 스냅샷**(lo..hi) 저장/복원(`u.prev` Float32Array, `tr.values.set`).
+- N=0이면 해당 키만(기존 동작).
+
 ## v16 — 키 저장 버그 수정 + Undo
 - **저장 버그 수정**: 기존 saveKey는 base 트랙 수정 후 `rebuildActions`로 새 mixer 생성 →
   실사용에서 포즈가 원본으로 되돌아가는 문제. 이제 **표시 중인 라이브 본 쿼터니언(또는
