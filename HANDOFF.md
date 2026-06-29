@@ -25,6 +25,18 @@
    높이 비율(`ptRest.y/psRest.y`)로 스케일 (월드 높이는 armature 스케일이 섞여 틀림 — Meshy
    Armature는 ×0.01). 부모 world 회전으로 이동 방향 재표현. drift off 시 좌우 이동 살아남.
 
+## v16 — 키 저장 버그 수정 + Undo
+- **저장 버그 수정**: 기존 saveKey는 base 트랙 수정 후 `rebuildActions`로 새 mixer 생성 →
+  실사용에서 포즈가 원본으로 되돌아가는 문제. 이제 **표시 중인 라이브 본 쿼터니언(또는
+  editOverride.q)을 그대로** base 클립 + **재생 중 클립을 in-place로** 수정. mixer 보간기는
+  같은 values 배열을 참조하므로 rebuild 없이 즉시 반영(새 트랙 생성 시에만 rebuild). 검증:
+  저장 후 700ms 애니메이션 돌려도 편집값 유지(되돌아가지 않음).
+- **Undo**: `undoStack`에 저장 직전 base 키값 스냅샷. "↶ 실행취소" 버튼 / **Ctrl+Z**.
+  Ctrl+Z는 editOverride(미저장 미리보기) 있으면 미리보기 취소, 없으면 마지막 저장 취소.
+  "되돌리기"→"미리보기 취소"로 명칭 변경(미저장 편집만 취소).
+- 참고: `mixer.update(0)`는 다음 애니메이션 프레임에 포즈 적용됨(즉시 동기 아님). seek 결정성
+  검증 완료(rotate+revert+seek == clean seek, dot 1.0).
+
 ## v15 — 조인트 회전 기즈모(매니퓰레이터)
 - `TransformControls`(three examples) 로드 → 선택 본에 **회전 기즈모** 표시. `initGizmo()`에서
   생성(rotate 모드, local 공간, size 0.8), `updateGizmo()`가 선택 본에 attach/detach.
