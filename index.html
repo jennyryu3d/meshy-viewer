@@ -48,6 +48,13 @@
     background:rgba(20,22,27,.85);border:1px solid var(--line);border-radius:8px;padding:5px 12px;pointer-events:none}
   #timecode b{color:var(--accent);font-weight:700}
   @media (max-width:640px){#timecode{top:auto;right:50%;transform:translateX(50%);bottom:70px;font-size:11px;padding:4px 10px}}
+  .busy{position:absolute;inset:0;z-index:8;display:none;align-items:center;justify-content:center;
+    background:rgba(12,13,16,.72);backdrop-filter:blur(2px)}
+  .busy.on{display:flex}
+  .busybox{background:var(--panel);border:1px solid var(--line);border-radius:12px;padding:18px 22px;min-width:260px;text-align:center}
+  #busyMsg{font-size:13px;color:var(--ink);margin-bottom:10px}
+  .busytrack{height:7px;background:var(--line);border-radius:4px;overflow:hidden}
+  #busyBar{height:100%;width:0;background:var(--accent);transition:width .12s}
   .dropveil{position:absolute;inset:0;z-index:6;display:none;align-items:center;justify-content:center;
     background:rgba(255,106,26,.08);border:2px dashed var(--accent);border-radius:0;
     color:var(--accent);font-size:15px;font-weight:600}
@@ -89,7 +96,7 @@
 
   <div class="panel" id="panel">
     <div class="panel-head" id="panelHead">
-      <h1>Meshy character viewer <span class="ver">v19</span></h1>
+      <h1>Meshy character viewer <span class="ver">v20</span></h1>
       <span class="head-actions">
         <button class="iconbtn" id="reloadBtn" title="강력 새로고침" onclick="event.stopPropagation();hardReload()">⟳</button>
         <button class="iconbtn" id="panelToggle" aria-label="toggle panel">▾</button>
@@ -185,6 +192,10 @@
 
   <div class="hintbar">drag to orbit · scroll to zoom · right-drag to pan · A = fit all · F = recenter origin</div>
   <div class="dropveil" id="dropveil">drop .glb to load</div>
+  <div class="busy" id="busy"><div class="busybox">
+    <div id="busyMsg">처리 중…</div>
+    <div class="busytrack"><div id="busyBar"></div></div>
+  </div></div>
 
 <script src="https://cdn.jsdelivr.net/npm/three@0.128.0/build/three.min.js"></script>
 <script src="https://cdn.jsdelivr.net/npm/three@0.128.0/examples/js/controls/OrbitControls.js"></script>
@@ -199,7 +210,7 @@ let editSkel=null, editOverride=null, graphCache=null, graphBone=null, lastGraph
 const FADE=0.3;
 const loader=new THREE.GLTFLoader();
 const $=id=>document.getElementById(id);
-const APP_VERSION="v19";
+const APP_VERSION="v20";
 
 // Cache-bust reload: GitHub Pages / mobile browsers cache aggressively, so a new
 // query string forces a fresh fetch of index.html (and the GLBs).
@@ -258,15 +269,26 @@ async function autoLoad(){
   await setCharacter(AUTOLOAD.character, 'character');
   if(!character){ setStatus('No bundled character found — drop or pick a .glb.', ''); return; }
   for(const url of AUTOLOAD.clips){ await addAnimation(url, url.replace(/\.[^.]+$/,'')); }
+  restorePersisted();   // re-apply any saved joint edits / imported mocap clips
 }
 
 function setStatus(msg,kind){const s=$('status');s.textContent=msg;s.className='status'+(kind?' '+kind:'');}
+
+// Full-screen progress overlay for long jobs (video mocap). frac: 0..1, or null for indeterminate.
+function setBusy(msg,frac){ const el=$('busy'); if(!el) return;
+  if(msg===false||msg==null){ el.classList.remove('on'); return; }
+  $('busyMsg').textContent=msg;
+  const bar=$('busyBar');
+  if(frac==null){ bar.style.width='100%'; bar.style.opacity='.35'; }
+  else { bar.style.opacity='1'; bar.style.width=Math.max(0,Math.min(1,frac))*100+'%'; }
+  el.classList.add('on'); }
 
 // Clear everything so a fresh character/clips can be loaded (overwrite workflow)
 function resetViewer(){
   if(character) scene.remove(character);
   character=null; mixer=null; actions={}; clipBases={}; playCache={}; active=null; activeName=null;
   editSkel=null; editOverride=null; graphCache=null; if(gizmo)gizmo.detach(); undoStack=[]; if($('boneSel'))$('boneSel').innerHTML=''; if($('editgrp'))$('editgrp').style.display='none';
+  dirtyClips.clear(); try{ localStorage.removeItem(PERSIST_KEY); }catch(e){}
   renderClips();
   setStatus('Cleared. Drop or pick a .glb to load.', '');
 }
@@ -1061,6 +1083,7 @@ function saveKey(){ const name=activeName, base=clipBases[name], b=selBone(); if
   if(needRebuild){ playCache={}; rebuildActions(); if(active) active.paused=true; }
   else { ensureSolo(); active.paused=true; }
   seekFrame(curFrame());   // snap to the exact key → shown pose == saved pose
+  dirtyClips.add(name); persistClips();   // survive reloads
   updatePlayBtn(); setStatus('키 저장: '+b.name+' @ f'+curFrame()+(N?(' (±'+N+' 블렌드)'):''),'ok'); }
 function undoKey(){ if(!undoStack.length){ setStatus('실행취소할 저장 없음',''); return; }
   const u=undoStack.pop(), base=clipBases[u.name]; if(!base){ return; }
@@ -1068,6 +1091,7 @@ function undoKey(){ if(!undoStack.length){ setStatus('실행취소할 저장 없
   if(tr){ if(u.created){ const i=base.tracks.indexOf(tr); if(i>=0) base.tracks.splice(i,1); } else { tr.values.set(u.prev); } }
   playCache={}; graphCache=null; clearOverride();
   const f=curFrame(); rebuildActions(); if(active){ active.paused=true; seekFrame(f); } updatePlayBtn();
+  dirtyClips.add(u.name); persistClips();
   setStatus('실행취소: '+u.boneName,'ok'); }
 function revertEdit(){ clearOverride(); graphCache=null; seekFrame(curFrame()); }
 function drawGraph(){ const cv=$('graph'); if(!cv) return; const ctx=cv.getContext('2d'); const c=actClip(), b=selBone();
@@ -1124,6 +1148,34 @@ function poseSourceFrame(S, P){          // P[i] = THREE.Vector3 landmark in sou
   aimTo(B.RightUpLeg,B.RightLeg,P[24],P[26]); aimTo(B.RightLeg,B.RightFoot,P[26],P[28]); aimTo(B.RightFoot,B.RightToeBase,P[28],P[32]);
 }
 function toThree(lm){ return new THREE.Vector3(lm.x, -lm.y, -lm.z); }   // MediaPipe world → three (y-up)
+// Temporal smoothing of raw landmarks: fill dropped frames, then moving-average each
+// coordinate over ±win frames. MediaPipe world coords are jittery per-frame; this is the
+// main cure for the "여러군데서 튀는" wobble before we ever hit the retargeter.
+function smoothLandmarks(frames, win){
+  win=win||2;
+  const N=frames.length; if(!N) return frames;
+  // forward/back fill nulls so every frame has landmarks to average
+  const filled=frames.slice(); let last=null;
+  for(let i=0;i<N;i++){ if(filled[i]) last=filled[i]; else filled[i]=last; }
+  last=null; for(let i=N-1;i>=0;i--){ if(filled[i]) last=filled[i]; else filled[i]=last; }
+  if(!filled[0]) return frames;         // no pose anywhere
+  const K=filled[0].length, out=[];
+  for(let i=0;i<N;i++){
+    const acc=[]; for(let k=0;k<K;k++) acc.push({x:0,y:0,z:0,n:0});
+    for(let d=-win;d<=win;d++){ const j=i+d; if(j<0||j>=N||!filled[j]) continue;
+      const w=1-Math.abs(d)/(win+1);   // triangular weight, centre heaviest
+      for(let k=0;k<K;k++){ const p=filled[j][k]; acc[k].x+=p.x*w; acc[k].y+=p.y*w; acc[k].z+=p.z*w; acc[k].n+=w; } }
+    out.push(acc.map(a=>({x:a.x/a.n, y:a.y/a.n, z:a.z/a.n})));
+  }
+  return out;
+}
+// Lowest foot/toe height of the currently-posed source, so we can drop the hips to the floor.
+function sourceFootFloor(S){
+  const B=S.B, v=new THREE.Vector3(); let minY=1e9;
+  ['LeftToeBase','RightToeBase','LeftFoot','RightFoot','LeftToeEnd','RightToeEnd'].forEach(n=>{
+    if(B[n]){ B[n].getWorldPosition(v); minY=Math.min(minY,v.y); } });
+  return minY;
+}
 // Build a retargeted character clip from an array of per-frame landmark sets.
 function landmarksToClip(frames, fps, name){
   const S=buildSourceHuman(); const bones=S.sm.skeleton.bones;
@@ -1131,6 +1183,11 @@ function landmarksToClip(frames, fps, name){
   let last=null;
   for(let f=0;f<frames.length;f++){ let lm=frames[f]||last; if(!lm) continue; last=lm;
     const P=lm.map(toThree); poseSourceFrame(S,P); S.sm.skeleton.bones[0].updateMatrixWorld(true);
+    // Per-frame grounding: MediaPipe world coords are hip-relative, so a crouch/sit keeps the
+    // hips at standing height and the character floats. Drop the hips so the lowest foot sits on
+    // y=0 — now sitting lowers the hips and standing raises them, exactly as in the video.
+    const floor=sourceFootFloor(S);
+    if(floor<1e8){ S.B.Hips.position.y-=floor; S.B.Hips.updateMatrixWorld(true); S.sm.skeleton.bones[0].updateMatrixWorld(true); }
     times.push(f/fps);
     bones.forEach((b,i)=>{ const q=b.quaternion; quat[i].push(q.x,q.y,q.z,q.w); });
     const hp=S.B.Hips.position; pos.push(hp.x,hp.y,hp.z);
@@ -1147,7 +1204,7 @@ function landmarksToClip(frames, fps, name){
 }
 async function loadPoseLandmarker(){
   if(window.__pose) return window.__pose;
-  setStatus('MediaPipe 로딩…');
+  setStatus('MediaPipe 로딩…'); setBusy('MediaPipe 모델 로딩 중… (최초 1회, 잠시 걸립니다)', null);
   const vision=await import('https://cdn.jsdelivr.net/npm/@mediapipe/tasks-vision@0.10.14/vision_bundle.mjs');
   const fileset=await vision.FilesetResolver.forVisionTasks('https://cdn.jsdelivr.net/npm/@mediapipe/tasks-vision@0.10.14/wasm');
   window.__pose=await vision.PoseLandmarker.createFromOptions(fileset,{baseOptions:{modelAssetPath:'https://storage.googleapis.com/mediapipe-models/pose_landmarker/pose_landmarker_full/float16/1/pose_landmarker_full.task'},runningMode:'VIDEO',numPoses:1});
@@ -1156,25 +1213,32 @@ async function loadPoseLandmarker(){
 async function mocapFromVideo(file){
   if(!character){ setStatus('먼저 캐릭터를 로드하세요','err'); return; }
   try{
+    setBusy('MediaPipe 준비 중…', null);
     const pose=await loadPoseLandmarker();
     const url=URL.createObjectURL(file), vid=document.createElement('video');
     vid.src=url; vid.muted=true; vid.playsInline=true; vid.crossOrigin='anonymous';
+    setBusy('영상 로딩 중…', null);
     await new Promise((res,rej)=>{ vid.onloadedmetadata=()=>res(); vid.onerror=()=>rej(new Error('video load failed')); });
     const fps=Math.max(6,Math.min(60,+$('mocapFps').value||24)), dur=vid.duration, dt=1/fps, frames=[];
+    const total=Math.max(1,Math.ceil(dur/dt)); let done=0;
     for(let t=0;t<dur;t+=dt){ vid.currentTime=t; await new Promise(r=>{ vid.onseeked=()=>r(); });
       const res=pose.detectForVideo(vid, Math.round(t*1000));
       frames.push((res.worldLandmarks&&res.worldLandmarks[0])?res.worldLandmarks[0].map(p=>({x:p.x,y:p.y,z:p.z})):null);
-      setStatus('포즈 추출… '+Math.round(t/dur*100)+'%');
+      done++; const frac=t/dur; setBusy('포즈 추출 중… '+Math.round(frac*100)+'%  ('+done+'/'+total+' 프레임)', frac);
+      setStatus('포즈 추출… '+Math.round(frac*100)+'%');
     }
     URL.revokeObjectURL(url);
     const got=frames.filter(Boolean).length;
-    if(got<2){ setStatus('사람 포즈를 못 찾음('+got+'프레임)','err'); return; }
+    if(got<2){ setBusy(false); setStatus('사람 포즈를 못 찾음('+got+'프레임)','err'); return; }
+    setBusy('모션 변환·정리 중…', null); await new Promise(r=>requestAnimationFrame(r));
+    const smoothed=smoothLandmarks(frames, 2);   // temporal denoise before retarget
     const nm=file.name.replace(/\.[^.]+$/,'');
-    const r=landmarksToClip(frames, fps, nm);
-    if(!r||r.error){ setStatus('변환 실패: '+((r&&r.error)||'unknown'),'err'); return; }
-    registerClip(r.clip, nm, 0); renderClips();
+    const r=landmarksToClip(smoothed, fps, nm);
+    if(!r||r.error){ setBusy(false); setStatus('변환 실패: '+((r&&r.error)||'unknown'),'err'); return; }
+    registerClip(r.clip, nm, 0); dirtyClips.add(r.clip.name); persistClips(); renderClips();
+    setBusy(false);
     setStatus('영상 모션 적용됨 ('+got+'프레임, '+r.matched+'본). 발 고정/편집으로 다듬으세요.','ok');
-  }catch(e){ console.error(e); setStatus('추출 오류: '+errText(e),'err'); }
+  }catch(e){ console.error(e); setBusy(false); setStatus('추출 오류: '+errText(e),'err'); }
 }
 function exportGLB(){
   if(!character){ setStatus('캐릭터 없음','err'); return; }
@@ -1185,6 +1249,37 @@ function exportGLB(){
     a.href=URL.createObjectURL(blob); a.download=(activeName||'motion')+'.glb'; a.click(); setTimeout(()=>URL.revokeObjectURL(a.href),1000);
     setStatus('GLB 내보냄'+(clip?(' ('+activeName+')'):''),'ok');
   }, (e)=>{ console.error(e); setStatus('GLB 내보내기 오류','err'); }, {binary:true, animations: clip?[clip]:[]});
+}
+
+// ── Persistence: keep mocap clips + joint edits across reloads (localStorage) ──────────
+const PERSIST_KEY='meshyViewer.clips.v1';
+const dirtyClips=new Set();   // names of clips worth saving (edited or mocap-imported)
+function charSig(){ const sm=findSkinned(character); return sm?sm.skeleton.bones.map(b=>b.name).join(','):''; }
+function f32ToB64(f32){ const u8=new Uint8Array(f32.buffer,f32.byteOffset,f32.byteLength); let s=''; const CH=0x8000;
+  for(let i=0;i<u8.length;i+=CH) s+=String.fromCharCode.apply(null,u8.subarray(i,i+CH)); return btoa(s); }
+function b64ToF32(b64){ const s=atob(b64), u8=new Uint8Array(s.length); for(let i=0;i<s.length;i++) u8[i]=s.charCodeAt(i); return new Float32Array(u8.buffer); }
+function serializeClip(clip){ return { name:clip.name, duration:clip.duration, retargeted:!!clip.retargeted,
+  tracks:clip.tracks.map(tr=>({ n:tr.name, vt:tr.ValueTypeName||'number',
+    t:f32ToB64(new Float32Array(tr.times)), v:f32ToB64(new Float32Array(tr.values)) })) }; }
+function deserializeClip(o){ const tracks=o.tracks.map(d=>{ const times=b64ToF32(d.t), vals=b64ToF32(d.v);
+    if(d.vt==='quaternion') return new THREE.QuaternionKeyframeTrack(d.n,times,vals);
+    if(d.vt==='vector')     return new THREE.VectorKeyframeTrack(d.n,times,vals);
+    return new THREE.NumberKeyframeTrack(d.n,times,vals); });
+  const c=new THREE.AnimationClip(o.name,o.duration,tracks); c.retargeted=o.retargeted; return c; }
+function persistClips(){ try{
+    const data={sig:charSig(), clips:{}}; let any=false;
+    dirtyClips.forEach(n=>{ if(clipBases[n]){ data.clips[n]=serializeClip(clipBases[n]); any=true; } });
+    if(any) localStorage.setItem(PERSIST_KEY, JSON.stringify(data)); else localStorage.removeItem(PERSIST_KEY);
+  }catch(e){ console.warn('persist failed', e); } }
+function restorePersisted(){
+  let raw; try{ raw=localStorage.getItem(PERSIST_KEY); }catch(e){ return; }
+  if(!raw) return; let data; try{ data=JSON.parse(raw); }catch(e){ return; }
+  if(!data||!data.clips) return;
+  if(data.sig && data.sig!==charSig()) return;   // saved against a different skeleton — skip
+  let n=0;
+  for(const name in data.clips){ let clip; try{ clip=deserializeClip(data.clips[name]); }catch(e){ continue; }
+    clipBases[name]=clip; dirtyClips.add(name); n++; }
+  if(n){ playCache={}; rebuildActions(); setStatus('저장된 편집/모션 '+n+'개 복원됨','ok'); }
 }
 
 function animate(){requestAnimationFrame(animate);const dt=clock.getDelta();if(mixer)mixer.update(dt);

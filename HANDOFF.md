@@ -25,6 +25,23 @@
    높이 비율(`ptRest.y/psRest.y`)로 스케일 (월드 높이는 armature 스케일이 섞여 틀림 — Meshy
    Armature는 ×0.01). 부모 world 회전으로 이동 방향 재표현. drift off 시 좌우 이동 살아남.
 
+## v20 — 모캡 진행바 · 히프 접지 · 랜드마크 스무딩 · 편집 영속화
+- **진행 오버레이**(`setBusy(msg,frac)` + `#busy` 오버레이): 영상→모션 처리 중 화면 중앙에 진행바.
+  MediaPipe 모델 로딩(불확정), 프레임별 포즈 추출(%/N), 변환 단계를 표시. 완료/에러 시 `setBusy(false)`.
+  → 사용자가 "처음엔 아무 일도 안 일어나는 줄 알았다"던 문제 해결.
+- **히프 공중부양 수정**: MediaPipe world 좌표는 골반 기준이라 앉아도 히프가 서 있는 높이에 머물러
+  캐릭터가 떠 보였음. `landmarksToClip`에서 프레임마다 소스 포즈의 최저 발/발끝 높이
+  (`sourceFootFloor`)를 구해 히프를 그만큼 내려 **최저 발이 y=0에 닿게** 접지. → 앉으면 히프가
+  내려가고 서면 올라감. 검증: 합성 stand→crouch에서 히프 Y 83.16→68.95(로컬 단위)로 하강.
+- **튐(지터) 감소**: 추출 직후 `smoothLandmarks(frames,2)`로 각 랜드마크 좌표를 시간축 ±2프레임
+  삼각가중 이동평균(중앙 최대) 스무딩. 드롭된 프레임은 앞/뒤 채움. → 리타게팅 전 원본 노이즈 제거.
+  검증: 합성 지터 2차차분 0.32→0.035(약 10×↓). 팔들기 리타게팅 무회귀(왼손 0.82→1.66 유지).
+- **편집/모션 영속화(localStorage)**: 조인트 키 저장(`saveKey`)·실행취소·영상 모캡 클립을
+  `dirtyClips`에 표시하고 `persistClips()`로 base64(Float32Array) 직렬화해 저장. 새로고침 시
+  `autoLoad` 끝에서 `restorePersisted()`가 스켈레톤 서명(본 이름) 일치 확인 후 base 클립 교체·
+  재적용. → "뷰어 다시 켜면 저장한 키가 다 사라진다" 문제 해결. `resetViewer`(Clear)는 저장도 삭제.
+  주의: 서명이 다른(=다른 골격) 캐릭터엔 미적용. 키: `meshyViewer.clips.v1`.
+
 ## v19 — 영상 → 모션 (MediaPipe) + GLB 내보내기
 - **영상→모션**: 브라우저에서 MediaPipe Pose Landmarker(`@mediapipe/tasks-vision`, 동적 import)로
   프레임별 33개 3D worldLandmarks 추출(`mocapFromVideo`). 이를 **clean 소스 휴머노이드 스켈레톤**
