@@ -25,6 +25,18 @@
    높이 비율(`ptRest.y/psRest.y`)로 스케일 (월드 높이는 armature 스케일이 섞여 틀림 — Meshy
    Armature는 ×0.01). 부모 world 회전으로 이동 방향 재표현. drift off 시 좌우 이동 살아남.
 
+## v19 — 영상 → 모션 (MediaPipe) + GLB 내보내기
+- **영상→모션**: 브라우저에서 MediaPipe Pose Landmarker(`@mediapipe/tasks-vision`, 동적 import)로
+  프레임별 33개 3D worldLandmarks 추출(`mocapFromVideo`). 이를 **clean 소스 휴머노이드 스켈레톤**
+  (`buildSourceHuman`, T-pose, 표준 본이름)에 aim으로 적용(`poseSourceFrame`)해 소스 클립 생성 후
+  **기존 `retargetToCharacter`** 로 캐릭터에 리타게팅(`landmarksToClip`). → rest보정/접지/무릎pole/
+  발고정/편집 전부 그대로 활용. 축변환 `toThree=(x,-y,-z)`(합성 검증). 등록은 registerClip.
+  검증: 합성 "왼팔 들기" 12프레임 → 캐릭터 왼손 Y 0.82→1.66, 22본 매칭.
+- **GLB 내보내기**(`exportGLB`): three GLTFExporter, 현재 재생 클립 포함 binary GLB 다운로드.
+- 한계/주의: 단일카메라라 품질 대략적, 루트 이동 없음(MediaPipe world는 hip 기준). MediaPipe
+  모델(~수MB) 최초 1회 다운로드. 실제 영상 추출은 브라우저에서만 테스트 가능(샌드박스 미검증).
+  MediaPipe/GLTFExporter는 CDN 로드(배포 브라우저 OK, 개발 프록시 차단).
+
 ## v18 — 순환(루프) 블렌드 + Z 단축키
 - **Z 단축키**: 입력칸 포커스 아님일 때 `z`/`Z`(또는 Ctrl+Z) = undo. editOverride 있으면 미리보기
   취소, 없으면 마지막 저장 취소.

@@ -89,7 +89,7 @@
 
   <div class="panel" id="panel">
     <div class="panel-head" id="panelHead">
-      <h1>Meshy character viewer <span class="ver">v18</span></h1>
+      <h1>Meshy character viewer <span class="ver">v19</span></h1>
       <span class="head-actions">
         <button class="iconbtn" id="reloadBtn" title="강력 새로고침" onclick="event.stopPropagation();hardReload()">⟳</button>
         <button class="iconbtn" id="panelToggle" aria-label="toggle panel">▾</button>
@@ -162,6 +162,18 @@
         <div class="legend">그래프: 선택 본 로컬 회전 오일러 X/<span style="color:#e0594f">R</span>·Y/<span style="color:#3fb568">G</span>·Z/<span style="color:#5b9bff">B</span>, 세로선=현재 프레임</div>
       </div>
 
+      <div class="grp">
+        <label>🎥 영상 → 모션 (실험)</label>
+        <label class="filebtn"><button class="ghost" style="width:100%" onclick="document.getElementById('vidFile').click()">영상 파일 선택 (mp4/webm/mov)</button></label>
+        <input type="file" id="vidFile" accept="video/*" style="display:none">
+        <div class="row" style="gap:6px;margin-top:6px;align-items:center">
+          <span style="font-size:11px;color:var(--muted)">추출 fps</span>
+          <input type="number" id="mocapFps" value="24" min="6" max="60" step="1">
+        </div>
+        <div class="legend">브라우저에서 MediaPipe로 3D 포즈를 뽑아 캐릭터에 적용합니다. 단일 카메라라 품질은 대략적이며, 발 고정/편집으로 다듬으세요.</div>
+        <button id="exportGlb" style="width:100%;margin-top:8px" title="현재 재생 클립을 GLB로 저장">⬇ 현재 클립 GLB로 내보내기</button>
+      </div>
+
       <div class="status" id="status">Waiting for a character…</div>
       <button id="fitBtn" style="width:100%;margin-top:10px" title="전체 맞춤 (A)">⤢ 전체 맞춤 (A)　·　F = 원점</button>
       <button id="resetBtn" style="width:100%;margin-top:6px;background:transparent" title="초기화 후 새 파일 로드">↺ 초기화 (새 캐릭터/클립 교체)</button>
@@ -179,6 +191,7 @@
 <script src="https://cdn.jsdelivr.net/npm/three@0.128.0/examples/js/loaders/GLTFLoader.js"></script>
 <script src="https://cdn.jsdelivr.net/npm/three@0.128.0/examples/js/utils/SkeletonUtils.js"></script>
 <script src="https://cdn.jsdelivr.net/npm/three@0.128.0/examples/js/controls/TransformControls.js"></script>
+<script src="https://cdn.jsdelivr.net/npm/three@0.128.0/examples/js/exporters/GLTFExporter.js"></script>
 <script>
 let scene,camera,renderer,controls,clock,mixer,character;
 let actions={}, clipBases={}, active=null, activeName=null;
@@ -186,7 +199,7 @@ let editSkel=null, editOverride=null, graphCache=null, graphBone=null, lastGraph
 const FADE=0.3;
 const loader=new THREE.GLTFLoader();
 const $=id=>document.getElementById(id);
-const APP_VERSION="v18";
+const APP_VERSION="v19";
 
 // Cache-bust reload: GitHub Pages / mobile browsers cache aggressively, so a new
 // query string forces a fresh fetch of index.html (and the GLBs).
@@ -914,6 +927,8 @@ function wireUI(){
   $('saveKey').onclick=saveKey;
   $('revertKey').onclick=revertEdit;
   $('undoKey').onclick=undoKey;
+  $('vidFile').onchange=e=>{ if(e.target.files[0]) mocapFromVideo(e.target.files[0]); e.target.value=''; };
+  $('exportGlb').onclick=exportGLB;
   $('panelHead').onclick=()=>$('panel').classList.toggle('collapsed');
   if(innerWidth<=640) $('panel').classList.add('collapsed');  // start collapsed on phones
   addEventListener('keydown',e=>{
@@ -1068,6 +1083,109 @@ function drawGraph(){ const cv=$('graph'); if(!cv) return; const ctx=cv.getConte
     for(let ch=0;ch<3;ch++){ ctx.strokeStyle=cols[ch]; ctx.beginPath();
       for(let i=0;i<n;i++){ const x=i/(n-1)*W, y=H/2-(graphCache[i][ch]/180)*(H/2-6); i?ctx.lineTo(x,y):ctx.moveTo(x,y); } ctx.stroke(); } }
   const tot=totalFrames(), cx=tot>0?curFrame()/tot*W:0; ctx.lineWidth=1.5; ctx.strokeStyle='#ff6a1a'; ctx.beginPath(); ctx.moveTo(cx,0); ctx.lineTo(cx,H); ctx.stroke(); }
+
+// ── Video → motion (MediaPipe pose → source skeleton → retarget onto character) ─────────
+// A clean humanoid SOURCE skeleton is aimed at the pose landmarks each frame; the resulting
+// clip is fed through the existing retargeter (rest-pose correction, grounding, knee-pole),
+// so all our cleanup (foot-lock, edit) works on it too.
+let srcHuman=null;
+function buildSourceHuman(){
+  if(srcHuman) return srcHuman;
+  // name, parent, offset(x,y,z) — T-pose humanoid in metres (arms out ±X, legs down −Y)
+  const D=[['Hips',null,0,0.92,0],['Spine2','Hips',0,0.10,0],['Spine1','Spine2',0,0.12,0],['Spine','Spine1',0,0.12,0],
+    ['Neck','Spine',0,0.10,0],['Head','Neck',0,0.10,0],['HeadEnd','Head',0,0.12,0],
+    ['LeftShoulder','Spine',0.04,0.06,0],['LeftArm','LeftShoulder',0.11,0,0],['LeftForeArm','LeftArm',0.26,0,0],['LeftHand','LeftForeArm',0.24,0,0],['LeftHandEnd','LeftHand',0.08,0,0],
+    ['RightShoulder','Spine',-0.04,0.06,0],['RightArm','RightShoulder',-0.11,0,0],['RightForeArm','RightArm',-0.26,0,0],['RightHand','RightForeArm',-0.24,0,0],['RightHandEnd','RightHand',-0.08,0,0],
+    ['LeftUpLeg','Hips',0.09,-0.06,0],['LeftLeg','LeftUpLeg',0,-0.40,0],['LeftFoot','LeftLeg',0,-0.40,0],['LeftToeBase','LeftFoot',0,-0.07,0.12],['LeftToeEnd','LeftToeBase',0,0,0.06],
+    ['RightUpLeg','Hips',-0.09,-0.06,0],['RightLeg','RightUpLeg',0,-0.40,0],['RightFoot','RightLeg',0,-0.40,0],['RightToeBase','RightFoot',0,-0.07,0.12],['RightToeEnd','RightToeBase',0,0,0.06]];
+  const byName={}, bones=[];
+  D.forEach(([n,p,x,y,z])=>{ const bo=new THREE.Bone(); bo.name=n; bo.position.set(x,y,z); byName[n]=bo; bones.push(bo); if(p) byName[p].add(bo); });
+  const root=byName.Hips; root.updateMatrixWorld(true);
+  const skeleton=new THREE.Skeleton(bones);
+  const sm=new THREE.SkinnedMesh(new THREE.BufferGeometry(), new THREE.MeshBasicMaterial());
+  const sc=new THREE.Object3D(); sc.add(root); sc.add(sm); sm.bind(skeleton);
+  srcHuman={sm, scene:sc, B:byName}; return srcHuman;
+}
+// aim `bone` so its child points from its own world position along (to−from)
+function aimTo(bone, child, from, to){ const d=to.clone().sub(from); if(d.lengthSq()<1e-9) return;
+  const bp=bone.getWorldPosition(new THREE.Vector3()); aimBone(bone, child, bp.add(d)); bone.updateMatrixWorld(true); }
+function poseSourceFrame(S, P){          // P[i] = THREE.Vector3 landmark in source space
+  const B=S.B, mid=(a,b)=>a.clone().add(b).multiplyScalar(0.5);
+  const hipsC=mid(P[23],P[24]), shC=mid(P[11],P[12]);
+  const xA=P[23].clone().sub(P[24]).normalize(), yA=shC.clone().sub(hipsC).normalize();
+  const zA=new THREE.Vector3().crossVectors(xA,yA).normalize(); xA.crossVectors(yA,zA).normalize();
+  B.Hips.quaternion.setFromRotationMatrix(new THREE.Matrix4().makeBasis(xA,yA,zA));
+  B.Hips.position.set(hipsC.x, 0.92+hipsC.y, hipsC.z); B.Hips.updateMatrixWorld(true);
+  aimTo(B.Spine2,B.Spine1,hipsC,shC); aimTo(B.Spine1,B.Spine,hipsC,shC); aimTo(B.Spine,B.Neck,hipsC,shC);
+  aimTo(B.Neck,B.Head,shC,P[0]); aimTo(B.Head,B.HeadEnd,shC,P[0]);
+  aimTo(B.LeftShoulder,B.LeftArm,shC,P[11]); aimTo(B.LeftArm,B.LeftForeArm,P[11],P[13]); aimTo(B.LeftForeArm,B.LeftHand,P[13],P[15]); aimTo(B.LeftHand,B.LeftHandEnd,P[15],P[19]);
+  aimTo(B.RightShoulder,B.RightArm,shC,P[12]); aimTo(B.RightArm,B.RightForeArm,P[12],P[14]); aimTo(B.RightForeArm,B.RightHand,P[14],P[16]); aimTo(B.RightHand,B.RightHandEnd,P[16],P[20]);
+  aimTo(B.LeftUpLeg,B.LeftLeg,P[23],P[25]); aimTo(B.LeftLeg,B.LeftFoot,P[25],P[27]); aimTo(B.LeftFoot,B.LeftToeBase,P[27],P[31]);
+  aimTo(B.RightUpLeg,B.RightLeg,P[24],P[26]); aimTo(B.RightLeg,B.RightFoot,P[26],P[28]); aimTo(B.RightFoot,B.RightToeBase,P[28],P[32]);
+}
+function toThree(lm){ return new THREE.Vector3(lm.x, -lm.y, -lm.z); }   // MediaPipe world → three (y-up)
+// Build a retargeted character clip from an array of per-frame landmark sets.
+function landmarksToClip(frames, fps, name){
+  const S=buildSourceHuman(); const bones=S.sm.skeleton.bones;
+  const times=[], quat=bones.map(()=>[]), pos=[];
+  let last=null;
+  for(let f=0;f<frames.length;f++){ let lm=frames[f]||last; if(!lm) continue; last=lm;
+    const P=lm.map(toThree); poseSourceFrame(S,P); S.sm.skeleton.bones[0].updateMatrixWorld(true);
+    times.push(f/fps);
+    bones.forEach((b,i)=>{ const q=b.quaternion; quat[i].push(q.x,q.y,q.z,q.w); });
+    const hp=S.B.Hips.position; pos.push(hp.x,hp.y,hp.z);
+  }
+  if(times.length<2) return null;
+  const tracks=[];
+  bones.forEach((b,i)=>{ tracks.push(new THREE.QuaternionKeyframeTrack(b.name+'.quaternion', times.slice(), new Float32Array(quat[i]))); });
+  tracks.push(new THREE.VectorKeyframeTrack('Hips.position', times.slice(), new Float32Array(pos)));
+  const srcClip=new THREE.AnimationClip(name||'mocap', times[times.length-1], tracks);
+  // retarget onto the character (reuse the whole pipeline)
+  const targetSM=findSkinned(character);
+  const r=retargetToCharacter(targetSM, S.sm, S.scene, srcClip);
+  return r.clip ? {clip:r.clip, matched:r.matched} : {error:r.error};
+}
+async function loadPoseLandmarker(){
+  if(window.__pose) return window.__pose;
+  setStatus('MediaPipe 로딩…');
+  const vision=await import('https://cdn.jsdelivr.net/npm/@mediapipe/tasks-vision@0.10.14/vision_bundle.mjs');
+  const fileset=await vision.FilesetResolver.forVisionTasks('https://cdn.jsdelivr.net/npm/@mediapipe/tasks-vision@0.10.14/wasm');
+  window.__pose=await vision.PoseLandmarker.createFromOptions(fileset,{baseOptions:{modelAssetPath:'https://storage.googleapis.com/mediapipe-models/pose_landmarker/pose_landmarker_full/float16/1/pose_landmarker_full.task'},runningMode:'VIDEO',numPoses:1});
+  return window.__pose;
+}
+async function mocapFromVideo(file){
+  if(!character){ setStatus('먼저 캐릭터를 로드하세요','err'); return; }
+  try{
+    const pose=await loadPoseLandmarker();
+    const url=URL.createObjectURL(file), vid=document.createElement('video');
+    vid.src=url; vid.muted=true; vid.playsInline=true; vid.crossOrigin='anonymous';
+    await new Promise((res,rej)=>{ vid.onloadedmetadata=()=>res(); vid.onerror=()=>rej(new Error('video load failed')); });
+    const fps=Math.max(6,Math.min(60,+$('mocapFps').value||24)), dur=vid.duration, dt=1/fps, frames=[];
+    for(let t=0;t<dur;t+=dt){ vid.currentTime=t; await new Promise(r=>{ vid.onseeked=()=>r(); });
+      const res=pose.detectForVideo(vid, Math.round(t*1000));
+      frames.push((res.worldLandmarks&&res.worldLandmarks[0])?res.worldLandmarks[0].map(p=>({x:p.x,y:p.y,z:p.z})):null);
+      setStatus('포즈 추출… '+Math.round(t/dur*100)+'%');
+    }
+    URL.revokeObjectURL(url);
+    const got=frames.filter(Boolean).length;
+    if(got<2){ setStatus('사람 포즈를 못 찾음('+got+'프레임)','err'); return; }
+    const nm=file.name.replace(/\.[^.]+$/,'');
+    const r=landmarksToClip(frames, fps, nm);
+    if(!r||r.error){ setStatus('변환 실패: '+((r&&r.error)||'unknown'),'err'); return; }
+    registerClip(r.clip, nm, 0); renderClips();
+    setStatus('영상 모션 적용됨 ('+got+'프레임, '+r.matched+'본). 발 고정/편집으로 다듬으세요.','ok');
+  }catch(e){ console.error(e); setStatus('추출 오류: '+errText(e),'err'); }
+}
+function exportGLB(){
+  if(!character){ setStatus('캐릭터 없음','err'); return; }
+  if(!THREE.GLTFExporter){ setStatus('GLTFExporter 미로드','err'); return; }
+  const clip = active ? active.getClip() : null;
+  new THREE.GLTFExporter().parse(character, (buf)=>{
+    const blob=new Blob([buf],{type:'model/gltf-binary'}); const a=document.createElement('a');
+    a.href=URL.createObjectURL(blob); a.download=(activeName||'motion')+'.glb'; a.click(); setTimeout(()=>URL.revokeObjectURL(a.href),1000);
+    setStatus('GLB 내보냄'+(clip?(' ('+activeName+')'):''),'ok');
+  }, (e)=>{ console.error(e); setStatus('GLB 내보내기 오류','err'); }, {binary:true, animations: clip?[clip]:[]});
+}
 
 function animate(){requestAnimationFrame(animate);const dt=clock.getDelta();if(mixer)mixer.update(dt);
   if(editOverride&&editOverride.bone) editOverride.bone.quaternion.copy(editOverride.q);
